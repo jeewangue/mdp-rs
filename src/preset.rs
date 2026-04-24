@@ -2,6 +2,7 @@
 //! and SUMMARY.md, and drop theme files into `theme/`.
 
 use anyhow::{Context, Result};
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use tempfile::TempDir;
 
@@ -38,7 +39,17 @@ impl Workspace {
         // symlinks.
         std::fs::create_dir_all(&book_src)?;
         let mut mirrored = 0usize;
-        mirror_md_files(&src_canonical, &src_canonical, &book_src, &mut mirrored)?;
+        // Seed the visited-set with the root canonical path so a child symlink
+        // that resolves back to root is treated as a cycle.
+        let mut visited: HashSet<PathBuf> = HashSet::new();
+        visited.insert(src_canonical.clone());
+        mirror_md_files(
+            &src_canonical,
+            &src_canonical,
+            &book_src,
+            &mut mirrored,
+            &mut visited,
+        )?;
         tracing::debug!("mirrored {mirrored} .md files into {}", book_src.display());
 
         let cfg = BookConfig::new(&src_canonical, title_override)?;
@@ -53,6 +64,13 @@ impl Workspace {
 /// Recursively mirror `.md` files from `src` into `dst`, preserving relative
 /// paths. Applies the common exclusion list at the directory level.
 ///
+/// Defenses against pathological trees:
+/// 1. Name-based exclusion (`is_excluded_dir`) skips common noise dirs.
+/// 2. Per-visit canonical path set catches CYCLIC symlinks (e.g.
+///    `docs/self -> ../docs`) that the exclusion list wouldn't see.
+/// 3. `canonical_root` check rejects any symlink whose resolved target
+///    leaves the tree.
+///
 /// On unix, files become symlinks (cheap, live-reload friendly — inotify
 /// follows symlinks). On Windows we fall back to copy.
 fn mirror_md_files(
@@ -60,6 +78,7 @@ fn mirror_md_files(
     canonical_root: &Path,
     dst_root: &Path,
     mirrored: &mut usize,
+    visited: &mut HashSet<PathBuf>,
 ) -> Result<()> {
     let rd = match std::fs::read_dir(src) {
         Ok(rd) => rd,
@@ -79,7 +98,7 @@ fn mirror_md_files(
         if md.file_type().is_symlink() {
             let resolved = match path.canonicalize() {
                 Ok(p) => p,
-                Err(_) => continue,
+                Err(_) => continue, // broken link or OS ELOOP — skip silently
             };
             if !resolved.starts_with(canonical_root) {
                 tracing::warn!(
@@ -97,7 +116,25 @@ fn mirror_md_files(
             {
                 continue;
             }
-            mirror_md_files(&path, canonical_root, dst_root, mirrored)?;
+
+            // Cycle detection: canonicalize the dir (resolving symlinks) and
+            // refuse to re-enter a path we've already walked. Catches
+            // `docs/self -> ../docs` as well as cross-branch symlinks that
+            // point to an already-mirrored directory.
+            let canonical = match path.canonicalize() {
+                Ok(p) => p,
+                Err(_) => continue,
+            };
+            if !visited.insert(canonical.clone()) {
+                tracing::warn!(
+                    "skipping cyclic / already-visited directory: {} (resolves to {})",
+                    path.display(),
+                    canonical.display()
+                );
+                continue;
+            }
+
+            mirror_md_files(&path, canonical_root, dst_root, mirrored, visited)?;
         } else if path.extension().and_then(|e| e.to_str()) == Some("md") {
             let rel = path.strip_prefix(canonical_root).unwrap_or(&path);
             let dst_path = dst_root.join(rel);
@@ -583,7 +620,9 @@ additional-js = ["http://evil/x.js"]
         let dst = tempfile::tempdir().unwrap();
         let canonical = root.canonicalize().unwrap();
         let mut n = 0;
-        super::mirror_md_files(&canonical, &canonical, dst.path(), &mut n).unwrap();
+        let mut visited = std::collections::HashSet::new();
+        visited.insert(canonical.clone());
+        super::mirror_md_files(&canonical, &canonical, dst.path(), &mut n, &mut visited).unwrap();
         assert_eq!(n, 2, "only keep.md and sub/keep2.md should be mirrored");
         assert!(dst.path().join("keep.md").exists());
         assert!(dst.path().join("sub/keep2.md").exists());
@@ -616,7 +655,9 @@ additional-js = ["http://evil/x.js"]
         let canonical = root.canonicalize().unwrap();
         let mut n = 0;
         // Must not panic / hang.
-        super::mirror_md_files(&canonical, &canonical, dst.path(), &mut n).unwrap();
+        let mut visited = std::collections::HashSet::new();
+        visited.insert(canonical.clone());
+        super::mirror_md_files(&canonical, &canonical, dst.path(), &mut n, &mut visited).unwrap();
         assert!(dst.path().join("top.md").exists());
         assert!(dst.path().join("pkg/README.md").exists());
         // node_modules was excluded — no recursion into the loop.
@@ -642,7 +683,9 @@ additional-js = ["http://evil/x.js"]
         let dst = tempfile::tempdir().unwrap();
         let canonical = root.canonicalize().unwrap();
         let mut n = 0;
-        super::mirror_md_files(&canonical, &canonical, dst.path(), &mut n).unwrap();
+        let mut visited = std::collections::HashSet::new();
+        visited.insert(canonical.clone());
+        super::mirror_md_files(&canonical, &canonical, dst.path(), &mut n, &mut visited).unwrap();
         assert!(dst.path().join("real.md").exists());
         assert!(
             !dst.path().join("escaping.md").exists(),
@@ -658,11 +701,86 @@ additional-js = ["http://evil/x.js"]
         let dst = tempfile::tempdir().unwrap();
         let canonical = src.path().canonicalize().unwrap();
         let mut n1 = 0;
-        super::mirror_md_files(&canonical, &canonical, dst.path(), &mut n1).unwrap();
+        let mut visited1 = std::collections::HashSet::new();
+        visited1.insert(canonical.clone());
+        super::mirror_md_files(&canonical, &canonical, dst.path(), &mut n1, &mut visited1).unwrap();
         let mut n2 = 0;
-        super::mirror_md_files(&canonical, &canonical, dst.path(), &mut n2).unwrap();
+        let mut visited2 = std::collections::HashSet::new();
+        visited2.insert(canonical.clone());
+        super::mirror_md_files(&canonical, &canonical, dst.path(), &mut n2, &mut visited2).unwrap();
         assert_eq!(n1, 1);
         assert_eq!(n2, 0, "rerun should be a no-op when all files are already mirrored");
+        assert!(dst.path().join("a.md").exists());
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn mirror_md_files_detects_cyclic_symlink() {
+        // `docs/self -> ../docs` — a cycle the exclusion list can't catch by
+        // name. Must not hang or recurse past OS symlink limit.
+        let src = tempfile::tempdir().unwrap();
+        let root = src.path();
+        std::fs::create_dir_all(root.join("docs")).unwrap();
+        std::fs::write(root.join("docs/a.md"), "# A").unwrap();
+        std::os::unix::fs::symlink("../docs", root.join("docs/self")).unwrap();
+
+        let dst = tempfile::tempdir().unwrap();
+        let canonical = root.canonicalize().unwrap();
+        let mut n = 0;
+        let mut visited = std::collections::HashSet::new();
+        visited.insert(canonical.clone());
+        super::mirror_md_files(&canonical, &canonical, dst.path(), &mut n, &mut visited).unwrap();
+        // a.md appears ONCE (not infinitely via docs/self/self/.../a.md)
+        assert_eq!(n, 1);
+        assert!(dst.path().join("docs/a.md").exists());
+        // docs/self was a cycle back to docs (which we already visited), so
+        // we shouldn't have mirrored anything through it.
+        assert!(!dst.path().join("docs/self").exists());
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn mirror_md_files_detects_cross_branch_cycle() {
+        // Two branches symlinked to the same target.
+        //   root/a.md
+        //   root/branch1 -> shared
+        //   root/branch2 -> shared
+        //   root/shared/b.md
+        // Both symlinks resolve into `shared/`; we should mirror shared's
+        // contents exactly once.
+        let src = tempfile::tempdir().unwrap();
+        let root = src.path();
+        std::fs::write(root.join("a.md"), "# A").unwrap();
+        std::fs::create_dir_all(root.join("shared")).unwrap();
+        std::fs::write(root.join("shared/b.md"), "# B").unwrap();
+        std::os::unix::fs::symlink("shared", root.join("branch1")).unwrap();
+        std::os::unix::fs::symlink("shared", root.join("branch2")).unwrap();
+
+        let dst = tempfile::tempdir().unwrap();
+        let canonical = root.canonicalize().unwrap();
+        let mut n = 0;
+        let mut visited = std::collections::HashSet::new();
+        visited.insert(canonical.clone());
+        super::mirror_md_files(&canonical, &canonical, dst.path(), &mut n, &mut visited).unwrap();
+        assert_eq!(n, 2, "a.md + shared/b.md only; branch1/branch2 dedup'd");
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn mirror_md_files_detects_symlink_back_to_root() {
+        // `root/loop -> .` — classic self-reference. Must not infinite-loop.
+        let src = tempfile::tempdir().unwrap();
+        let root = src.path();
+        std::fs::write(root.join("a.md"), "# A").unwrap();
+        std::os::unix::fs::symlink(".", root.join("loop")).unwrap();
+
+        let dst = tempfile::tempdir().unwrap();
+        let canonical = root.canonicalize().unwrap();
+        let mut n = 0;
+        let mut visited = std::collections::HashSet::new();
+        visited.insert(canonical.clone());
+        super::mirror_md_files(&canonical, &canonical, dst.path(), &mut n, &mut visited).unwrap();
+        assert_eq!(n, 1);
         assert!(dst.path().join("a.md").exists());
     }
 
