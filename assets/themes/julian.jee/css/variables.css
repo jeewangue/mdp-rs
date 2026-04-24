@@ -1,0 +1,97 @@
+/*
+ * julian.jee theme — palette ported from ~/.config/nvim/assets/markdown-preview/markdown.css
+ *
+ * Heading colors:  deep red  →  red-brown  →  orange  →  gold  →  tan
+ * Strong text:     teal
+ * Inline code:     gold on secondary bg
+ * Base palette:    GitHub-like light/dark with data-theme toggle
+ */
+
+:root {
+  --julianjee-h1: #ae2102;
+  --julianjee-h2: #bb3e03;
+  --julianjee-h3: #ca6702;
+  --julianjee-h4: #ee9b00;
+  --julianjee-h5: #e9d8a6;
+  --julianjee-h6: #e9d8a6;
+  --julianjee-strong: #94d2bd;
+  --julianjee-inline-code: #ee9b00;
+}
+
+/* ------------- julian.jee LIGHT ------------- */
+.julian-jee {
+  --bg: #fff;
+  --fg: #333;
+  --fg-muted: #777;
+  --sidebar-bg: #fafbfc;
+  --sidebar-fg: #444d56;
+  --sidebar-active: #ae2102;
+  --sidebar-spacer: #ddd;
+  --scrollbar: #8F8F8F;
+  --searchbar-bg: #f8f8f8;
+  --searchbar-fg: #000;
+  --searchbar-shadow: 1px 1px 3px #ccc;
+  --searchresults-header-fg: #666;
+  --searchresults-border: #888;
+  --searchresults-li-bg: #e4f2fe;
+  --search-mark-bg: #a2cff5;
+  --links: #4078c0;
+  --inline-code-color: var(--julianjee-inline-code);
+  --inline-code-bg: #fafbfc;
+  --theme-popup-bg: #fafbfc;
+  --theme-popup-border: #cccccc;
+  --theme-hover: #f6f8fa;
+  --quote-bg: #f9f9f9;
+  --quote-border: #dfe2e5;
+  --table-border-color: #dfe2e5;
+  --table-header-bg: #fafbfc;
+  --table-alternate-bg: #f8f8f8;
+  color-scheme: light;
+}
+
+.julian-jee h1 { color: var(--julianjee-h1); border-bottom: 1px solid #eaecef; padding-bottom: 0.3em; }
+.julian-jee h2 { color: var(--julianjee-h2); border-bottom: 1px solid #eaecef; padding-bottom: 0.3em; }
+.julian-jee h3 { color: var(--julianjee-h3); }
+.julian-jee h4 { color: var(--julianjee-h4); }
+.julian-jee h5 { color: var(--julianjee-h5); }
+.julian-jee h6 { color: var(--julianjee-h6); }
+.julian-jee strong { color: var(--julianjee-strong); }
+
+/* ------------- julian.jee DARK ------------- */
+.julian-jee-dark {
+  --bg: #0d1117;
+  --fg: #c9d1d9;
+  --fg-muted: #8b949e;
+  --sidebar-bg: #161b22;
+  --sidebar-fg: #c9d1d9;
+  --sidebar-active: #ee9b00;
+  --sidebar-spacer: #30363d;
+  --scrollbar: #444c56;
+  --searchbar-bg: #0d1117;
+  --searchbar-fg: #c9d1d9;
+  --searchbar-shadow: 1px 1px 3px #0a0a0a;
+  --searchresults-header-fg: #8b949e;
+  --searchresults-border: #30363d;
+  --searchresults-li-bg: #21262d;
+  --search-mark-bg: #ca6702;
+  --links: #58a6ff;
+  --inline-code-color: var(--julianjee-inline-code);
+  --inline-code-bg: #161b22;
+  --theme-popup-bg: #161b22;
+  --theme-popup-border: #30363d;
+  --theme-hover: #21262d;
+  --quote-bg: #161b22;
+  --quote-border: #3b434b;
+  --table-border-color: #3b434b;
+  --table-header-bg: #161b22;
+  --table-alternate-bg: #0d1117;
+  color-scheme: dark;
+}
+
+.julian-jee-dark h1 { color: var(--julianjee-h1); border-bottom: 1px solid #21262d; padding-bottom: 0.3em; }
+.julian-jee-dark h2 { color: var(--julianjee-h2); border-bottom: 1px solid #21262d; padding-bottom: 0.3em; }
+.julian-jee-dark h3 { color: var(--julianjee-h3); }
+.julian-jee-dark h4 { color: var(--julianjee-h4); }
+.julian-jee-dark h5 { color: var(--julianjee-h5); }
+.julian-jee-dark h6 { color: var(--julianjee-h6); }
+.julian-jee-dark strong { color: var(--julianjee-strong); }

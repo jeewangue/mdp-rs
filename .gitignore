@@ -1,0 +1,5 @@
+/target
+/book
+Cargo.lock.bak
+.DS_Store
+*.swp

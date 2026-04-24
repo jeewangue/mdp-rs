@@ -1,0 +1,37 @@
+[package]
+name = "mdp"
+version = "0.1.0"
+edition = "2024"
+description = "Ad-hoc markdown previewer powered by mdbook — directory → browser in one command"
+authors = ["Julian Jee <jeewangue@gmail.com>"]
+license = "MIT"
+repository = "https://gitlab.com/julian.jee/mdp-rs"
+
+[[bin]]
+name = "mdp"
+path = "src/main.rs"
+
+[dependencies]
+anyhow = "1"
+clap = { version = "4", features = ["derive", "env"] }
+serde = { version = "1", features = ["derive"] }
+toml = "0.8"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+# Theme + preprocessor assets are embedded into the binary.
+rust-embed = "8"
+
+# Robust CLI operations
+which = "7"
+tempfile = "3"
+opener = "0.7"
+
+[dev-dependencies]
+assert_cmd = "2"
+predicates = "3"
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+strip = true

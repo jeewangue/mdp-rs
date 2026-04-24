@@ -1,0 +1,159 @@
+/*
+ * julian.jee — content area styling
+ * complements mdbook's general.css; applied via additional-css in book.toml
+ */
+
+.content {
+  font-family: "Helvetica Neue", Helvetica, "Segoe UI", Arial, freesans, sans-serif,
+               "Apple Color Emoji", "Segoe UI Emoji", "Segoe UI Symbol";
+  line-height: 1.6;
+}
+
+.content code {
+  font-family: "Hack Nerd Font", "JetBrains Mono", Menlo, Monaco, "Courier New", monospace;
+  font-size: 85%;
+}
+
+/* inline code — golden on subtle bg */
+.content :not(pre) > code {
+  color: var(--julianjee-inline-code);
+  background-color: var(--inline-code-bg);
+  padding: 0.2em 0.3em;
+  border-radius: 3px;
+  border: 1px solid var(--quote-border);
+}
+
+/* headings — colors set in variables.css per theme, here: spacing + weight */
+.content h1, .content h2, .content h3, .content h4, .content h5, .content h6 {
+  font-weight: bold;
+  line-height: 1.4;
+  margin-top: 1em;
+  margin-bottom: 16px;
+}
+
+.content h1 { font-size: 2.25em; line-height: 1.2; }
+.content h2 { font-size: 1.75em; line-height: 1.225; }
+.content h3 { font-size: 1.5em;  line-height: 1.43; }
+.content h4 { font-size: 1.25em; }
+.content h5 { font-size: 1em; }
+.content h6 { font-size: 1em; color: var(--fg-muted); }
+
+/* strong — teal (signature color) */
+.content strong {
+  color: var(--julianjee-strong);
+  font-weight: bold;
+}
+
+/* blockquote — GitHub-style left border */
+.content blockquote {
+  color: var(--fg-muted);
+  border-left: 4px solid var(--quote-border);
+  background: var(--quote-bg);
+  padding: 0 15px;
+  margin-left: 0;
+  margin-right: 0;
+}
+
+/* tables — stripe + borders */
+.content table {
+  display: block;
+  width: 100%;
+  overflow: auto;
+  border-collapse: collapse;
+  border-spacing: 0;
+}
+
+.content table tr {
+  background-color: var(--bg);
+  border-top: 1px solid var(--table-border-color);
+}
+
+.content table tr:nth-child(2n) {
+  background-color: var(--table-alternate-bg);
+}
+
+.content table th,
+.content table td {
+  padding: 6px 13px;
+  border: 1px solid var(--table-border-color);
+  vertical-align: top;
+}
+
+.content table th {
+  background-color: var(--table-header-bg);
+}
+
+/* links */
+.content a {
+  color: var(--links);
+  text-decoration: none;
+}
+.content a:hover {
+  text-decoration: underline;
+}
+
+/* hr */
+.content hr {
+  margin: 20px 0;
+  height: 0;
+  border: 0;
+  border-top: 1px solid var(--quote-border);
+}
+
+/* code blocks — padded */
+.content pre {
+  padding: 16px;
+  overflow: auto;
+  line-height: 1.45;
+  border-radius: 3px;
+}
+
+/* task list checkboxes — cosmetic alignment */
+.content ul.task-list,
+.content li.task-list-item {
+  list-style-type: none;
+}
+
+/* sidebar active heading — accent (matches H1) */
+.sidebar .chapter li.chapter-item a.active,
+.sidebar .chapter li.chapter-item strong {
+  color: var(--sidebar-active);
+}
+
+/* Hide the RIGHT-side page TOC — the left sidebar (mdbook-pagetoc nested under
+ * the current chapter in SUMMARY) already shows heading-level navigation, so the
+ * right one is redundant. */
+nav.pagetoc {
+  display: none !important;
+}
+/* reclaim the right margin for wider content */
+.content main {
+  max-width: none;
+}
+
+/* Style the left-sidebar heading entries injected by mdbook-pagetoc. These are
+ * added as nested chapter-items under the currently active chapter. */
+.sidebar .chapter li a {
+  color: var(--sidebar-fg);
+}
+.sidebar .chapter li a.active {
+  color: var(--sidebar-active);
+  font-weight: bold;
+}
+
+/* GFM alerts (mdbook 0.5+ native admonition support) */
+.alert {
+  padding: 0.5em 1em;
+  margin: 1em 0;
+  border-left: 4px solid var(--quote-border);
+  background: var(--quote-bg);
+}
+.alert-note     { border-left-color: #4078c0; }
+.alert-tip      { border-left-color: #2e8b57; }
+.alert-important{ border-left-color: #6f42c1; }
+.alert-warning  { border-left-color: #bb3e03; }
+.alert-caution  { border-left-color: #ae2102; }
+.alert-title {
+  font-weight: bold;
+  margin-bottom: 0.25em;
+}
