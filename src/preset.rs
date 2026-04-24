@@ -26,25 +26,122 @@ impl Workspace {
 
         let src_canonical = src_dir.canonicalize().context("source dir must exist")?;
 
-        // Symlink user's dir into `src/` so mdbook watches the real files (live reload
-        // works on save).
-        #[cfg(unix)]
-        std::os::unix::fs::symlink(&src_canonical, &book_src)
-            .context("failed to symlink source dir into workspace")?;
-        #[cfg(not(unix))]
-        {
-            std::fs::create_dir_all(&book_src)?;
-            copy_recursive(&src_canonical, &book_src)?;
-        }
+        // Mirror ONLY `.md` files from the user's dir into `src/` as per-file
+        // symlinks.
+        //
+        // Earlier versions symlinked the entire user dir. That's cheaper but
+        // mdbook walks the whole src tree WITHOUT honoring our exclusion list,
+        // so node_modules self-loops (`foo/node_modules/foo -> ../..`, common
+        // in npm peer-dep setups) crashed the build with "Too many levels of
+        // symbolic links". Per-file mirroring keeps mdbook scoped to files we
+        // whitelisted while inotify still fires on edits because it follows
+        // symlinks.
+        std::fs::create_dir_all(&book_src)?;
+        let mut mirrored = 0usize;
+        mirror_md_files(&src_canonical, &src_canonical, &book_src, &mut mirrored)?;
+        tracing::debug!("mirrored {mirrored} .md files into {}", book_src.display());
 
         let cfg = BookConfig::new(&src_canonical, title_override)?;
         write_book_toml(&book_root, &cfg)?;
         generate_summary(&book_src, &src_canonical)?;
         install_theme(&book_root)?;
 
-        let _ = src_canonical; // moved into generate_summary above
         Ok(Self { root: book_root, src: book_src, _tmp: tmp })
     }
+}
+
+/// Recursively mirror `.md` files from `src` into `dst`, preserving relative
+/// paths. Applies the common exclusion list at the directory level.
+///
+/// On unix, files become symlinks (cheap, live-reload friendly — inotify
+/// follows symlinks). On Windows we fall back to copy.
+fn mirror_md_files(
+    src: &Path,
+    canonical_root: &Path,
+    dst_root: &Path,
+    mirrored: &mut usize,
+) -> Result<()> {
+    let rd = match std::fs::read_dir(src) {
+        Ok(rd) => rd,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(e) => return Err(e.into()),
+    };
+    for entry in rd {
+        let entry = entry?;
+        let path = entry.path();
+
+        let md = match std::fs::symlink_metadata(&path) {
+            Ok(m) => m,
+            Err(_) => continue,
+        };
+
+        // Block symlinks that escape the tree — their target could be anywhere.
+        if md.file_type().is_symlink() {
+            let resolved = match path.canonicalize() {
+                Ok(p) => p,
+                Err(_) => continue,
+            };
+            if !resolved.starts_with(canonical_root) {
+                tracing::warn!(
+                    "skipping symlink that escapes source tree: {}",
+                    path.display()
+                );
+                continue;
+            }
+        }
+
+        // `is_dir()` on a symlink follows; we already bounded it above.
+        if path.is_dir() {
+            if let Some(name) = path.file_name().and_then(|n| n.to_str())
+                && is_excluded_dir(name)
+            {
+                continue;
+            }
+            mirror_md_files(&path, canonical_root, dst_root, mirrored)?;
+        } else if path.extension().and_then(|e| e.to_str()) == Some("md") {
+            let rel = path.strip_prefix(canonical_root).unwrap_or(&path);
+            let dst_path = dst_root.join(rel);
+            if let Some(parent) = dst_path.parent() {
+                std::fs::create_dir_all(parent)?;
+            }
+            if dst_path.exists() {
+                continue;
+            }
+            #[cfg(unix)]
+            std::os::unix::fs::symlink(&path, &dst_path)?;
+            #[cfg(not(unix))]
+            std::fs::copy(&path, &dst_path)?;
+            *mirrored += 1;
+        }
+    }
+    Ok(())
+}
+
+/// Common noise directories we never mirror into the mdbook workspace. Kept
+/// conservative — we only exclude directories that virtually never hold
+/// user-authored markdown.
+pub(crate) fn is_excluded_dir(name: &str) -> bool {
+    // Hidden dirs (`.foo`) blanket-excluded — covers `.git`, `.svn`, `.hg`,
+    // `.idea`, `.vscode`, `.claude`, `.cache`, `.venv`, `.next`, `.nuxt`,
+    // `.pytest_cache`, `.mypy_cache`, `.ruff_cache`, `.bin`, `.wrangler`.
+    if name.starts_with('.') {
+        return true;
+    }
+    matches!(
+        name,
+        "node_modules"
+            | "target"              // rust
+            | "dist"
+            | "build"
+            | "out"
+            | "venv"
+            | "__pycache__"
+            | "vendor"              // go / php
+            | "Pods"                // cocoapods
+            | "DerivedData"         // xcode
+            | "bower_components"
+            | "coverage"
+    )
 }
 
 fn write_book_toml(root: &Path, cfg: &BookConfig) -> Result<()> {
@@ -171,8 +268,9 @@ fn generate_summary(src: &Path, canonical_root: &Path) -> Result<()> {
 }
 
 /// Walk `dir` recursively, collecting `.md` files. `canonical_root` is used to
-/// reject any entry whose canonical path escapes the tree (symlink traversal
-/// defense).
+/// reject symlinks whose target escapes the tree. Shares the exclusion list
+/// with `mirror_md_files` so SUMMARY.md generation and workspace mirroring
+/// see exactly the same files.
 fn walk_md(dir: &Path, canonical_root: &Path) -> Result<Vec<PathBuf>> {
     let mut out = Vec::new();
     let rd = match std::fs::read_dir(dir) {
@@ -184,10 +282,6 @@ fn walk_md(dir: &Path, canonical_root: &Path) -> Result<Vec<PathBuf>> {
         let entry = entry?;
         let path = entry.path();
 
-        // Reject any symlink that escapes the tree. We use symlink_metadata to
-        // detect the symlink without following, then canonicalize to verify the
-        // target is under our root. Non-symlink entries also get canonicalized
-        // as a belt-and-braces check against `..` inside paths.
         let md = match std::fs::symlink_metadata(&path) {
             Ok(m) => m,
             Err(_) => continue,
@@ -203,11 +297,9 @@ fn walk_md(dir: &Path, canonical_root: &Path) -> Result<Vec<PathBuf>> {
             }
         }
 
-        let file_type = entry.file_type()?;
-        if file_type.is_dir() {
-            // Skip hidden + common noise
+        if path.is_dir() {
             if let Some(name) = path.file_name().and_then(|n| n.to_str())
-                && (name.starts_with('.') || name == "node_modules" || name == "target")
+                && is_excluded_dir(name)
             {
                 continue;
             }
@@ -215,7 +307,6 @@ fn walk_md(dir: &Path, canonical_root: &Path) -> Result<Vec<PathBuf>> {
         } else if path.extension().and_then(|e| e.to_str()) == Some("md") {
             let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
             if name == "SUMMARY.md" || name == "README.md" {
-                // SUMMARY.md: we're generating it. README.md: handled by mdbook natively.
                 continue;
             }
             out.push(path);
@@ -440,6 +531,139 @@ additional-js = ["http://evil/x.js"]
             .collect();
         found.sort();
         assert_eq!(found, vec!["alias.md".to_string(), "real.md".to_string()]);
+    }
+
+    #[test]
+    fn is_excluded_dir_covers_common_noise() {
+        for name in [
+            "node_modules", "target", "dist", "build", "out",
+            "venv", "__pycache__", "vendor", "Pods", "DerivedData",
+            "bower_components", "coverage",
+            ".git", ".svn", ".hg", ".idea", ".vscode", ".claude",
+            ".cache", ".venv", ".next", ".nuxt",
+            ".pytest_cache", ".mypy_cache", ".ruff_cache",
+            ".bin", ".wrangler", ".DS_Store",
+        ] {
+            assert!(super::is_excluded_dir(name), "{name} should be excluded");
+        }
+    }
+
+    #[test]
+    fn is_excluded_dir_allows_content_dirs() {
+        for name in [
+            "docs", "src", "notes", "posts", "chapters",
+            "nodemodules",   // close but not the magic name
+            "target-legacy", // prefix only
+            "my-build",      // suffix only
+            "anything",      // "target" substring but not whole name
+        ] {
+            assert!(!super::is_excluded_dir(name), "{name} should NOT be excluded");
+        }
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn mirror_md_files_skips_excluded_dirs() {
+        // Tree:
+        //   root/keep.md
+        //   root/sub/keep2.md
+        //   root/node_modules/hidden.md  ← excluded
+        //   root/target/in-target.md     ← excluded
+        //   root/.git/config.md          ← excluded (hidden)
+        //   root/.claude/settings.md     ← excluded (hidden)
+        let src = tempfile::tempdir().unwrap();
+        let root = src.path();
+        std::fs::write(root.join("keep.md"), "# K").unwrap();
+        std::fs::create_dir_all(root.join("sub")).unwrap();
+        std::fs::write(root.join("sub/keep2.md"), "# K2").unwrap();
+        for d in ["node_modules", "target", ".git", ".claude"] {
+            std::fs::create_dir_all(root.join(d)).unwrap();
+            std::fs::write(root.join(d).join("hidden.md"), "# H").unwrap();
+        }
+        let dst = tempfile::tempdir().unwrap();
+        let canonical = root.canonicalize().unwrap();
+        let mut n = 0;
+        super::mirror_md_files(&canonical, &canonical, dst.path(), &mut n).unwrap();
+        assert_eq!(n, 2, "only keep.md and sub/keep2.md should be mirrored");
+        assert!(dst.path().join("keep.md").exists());
+        assert!(dst.path().join("sub/keep2.md").exists());
+        assert!(!dst.path().join("node_modules").exists());
+        assert!(!dst.path().join("target").exists());
+        assert!(!dst.path().join(".git").exists());
+        assert!(!dst.path().join(".claude").exists());
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn mirror_md_files_survives_symlink_loop() {
+        // Reproduce the npm self-loop pattern:
+        //   root/pkg/node_modules/pkg -> ../../pkg
+        // If we don't exclude node_modules this would infinite-loop when mdbook
+        // scans — but our mirror should skip it before mdbook ever sees it.
+        let src = tempfile::tempdir().unwrap();
+        let root = src.path();
+        std::fs::write(root.join("top.md"), "# T").unwrap();
+        std::fs::create_dir_all(root.join("pkg/node_modules")).unwrap();
+        std::fs::write(root.join("pkg/README.md"), "# R").unwrap();
+        // Create the loop.
+        std::os::unix::fs::symlink(
+            "../../pkg",
+            root.join("pkg/node_modules/pkg"),
+        )
+        .unwrap();
+
+        let dst = tempfile::tempdir().unwrap();
+        let canonical = root.canonicalize().unwrap();
+        let mut n = 0;
+        // Must not panic / hang.
+        super::mirror_md_files(&canonical, &canonical, dst.path(), &mut n).unwrap();
+        assert!(dst.path().join("top.md").exists());
+        assert!(dst.path().join("pkg/README.md").exists());
+        // node_modules was excluded — no recursion into the loop.
+        assert!(!dst.path().join("pkg/node_modules").exists());
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn mirror_md_files_rejects_symlink_escaping_root() {
+        // A symlink whose target is OUTSIDE canonical_root must be skipped even
+        // if it ends with `.md`.
+        let outside = tempfile::tempdir().unwrap();
+        std::fs::write(outside.path().join("secret.md"), "# S").unwrap();
+        let src = tempfile::tempdir().unwrap();
+        let root = src.path();
+        std::fs::write(root.join("real.md"), "# R").unwrap();
+        std::os::unix::fs::symlink(
+            outside.path().join("secret.md"),
+            root.join("escaping.md"),
+        )
+        .unwrap();
+
+        let dst = tempfile::tempdir().unwrap();
+        let canonical = root.canonicalize().unwrap();
+        let mut n = 0;
+        super::mirror_md_files(&canonical, &canonical, dst.path(), &mut n).unwrap();
+        assert!(dst.path().join("real.md").exists());
+        assert!(
+            !dst.path().join("escaping.md").exists(),
+            "tree-escaping symlink should not be mirrored"
+        );
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn mirror_md_files_is_idempotent() {
+        let src = tempfile::tempdir().unwrap();
+        std::fs::write(src.path().join("a.md"), "# A").unwrap();
+        let dst = tempfile::tempdir().unwrap();
+        let canonical = src.path().canonicalize().unwrap();
+        let mut n1 = 0;
+        super::mirror_md_files(&canonical, &canonical, dst.path(), &mut n1).unwrap();
+        let mut n2 = 0;
+        super::mirror_md_files(&canonical, &canonical, dst.path(), &mut n2).unwrap();
+        assert_eq!(n1, 1);
+        assert_eq!(n2, 0, "rerun should be a no-op when all files are already mirrored");
+        assert!(dst.path().join("a.md").exists());
     }
 
     #[test]

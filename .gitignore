@@ -3,3 +3,7 @@
 Cargo.lock.bak
 .DS_Store
 *.swp
+
+# In case mdp is run on the repo root during dev, SUMMARY.md is an mdbook
+# artifact from an earlier bug and should never be tracked.
+SUMMARY.md
