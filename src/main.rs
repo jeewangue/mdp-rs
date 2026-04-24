@@ -91,6 +91,22 @@ enum Commands {
 
     /// Print embedded book.toml template + theme files to stdout (debug).
     DumpAssets,
+
+    /// mdbook preprocessor: render plantuml/mermaid fences to SVG at build time.
+    /// Called automatically by `mdp pdf`. Reads JSON from stdin, writes JSON to
+    /// stdout per the mdbook preprocessor protocol.
+    ///
+    /// Usage:
+    ///   mdp preprocess                  # run transform (stdin → stdout)
+    ///   mdp preprocess supports <name>  # capability check (exit 0 = supported)
+    #[command(hide = true)]
+    Preprocess {
+        /// When present, checks capability for this renderer name and exits.
+        supports: Option<String>,
+        /// Renderer name when `supports` is the literal "supports" (mdbook calls
+        /// `preprocess supports <renderer>`). Kept for protocol compatibility.
+        renderer: Option<String>,
+    },
 }
 
 fn main() -> Result<()> {
@@ -111,5 +127,8 @@ fn main() -> Result<()> {
         }
         Commands::InstallDeps { force } => commands::install::run(force),
         Commands::DumpAssets => commands::dump::run(),
+        Commands::Preprocess { supports, renderer } => {
+            commands::preprocess::run(supports, renderer)
+        }
     }
 }

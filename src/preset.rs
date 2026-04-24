@@ -70,6 +70,12 @@ fn write_book_toml(root: &Path, cfg: &BookConfig) -> Result<()> {
     Ok(())
 }
 
+/// Public re-export for callers outside this module that need the same escaping
+/// (e.g. commands::pdf when it appends preprocessor config to book.toml).
+pub fn toml_string_body_public(s: &str) -> String {
+    toml_string_body(s)
+}
+
 /// Escape `s` as a TOML basic string body — i.e. the bit that goes INSIDE
 /// `"..."` in the template. Handles all TOML-required escapes per
 /// https://toml.io/en/v1.0.0#string:

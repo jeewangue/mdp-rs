@@ -1,0 +1,155 @@
+' Tokyo Night skinparam header. Prepended to every PlantUML block at
+' preprocessor time so diagrams share a consistent palette with the julian.jee
+' web theme. Works across sequence / class / component / activity / state.
+'
+' Palette (from plantuml-tokyonight skill):
+'   bg #1a1b26  surface #24283b  surface-alt #292e42  border #565f89
+'   fg #c0caf5  fg-dim #a9b1d6  muted #565f89
+'   blue #7aa2f7  purple #bb9af7  green #9ece6a  yellow #e0af68
+'   red #f7768e  cyan #7dcfff  teal #73daca
+
+skinparam backgroundColor #1a1b26
+skinparam defaultFontColor #c0caf5
+skinparam defaultFontName Monospaced
+skinparam defaultFontSize 12
+skinparam shadowing false
+skinparam roundCorner 8
+
+skinparam arrow {
+  Color #7aa2f7
+  FontColor #a9b1d6
+  FontSize 10
+}
+skinparam note {
+  BackgroundColor #292e42
+  BorderColor #565f89
+  FontColor #a9b1d6
+  FontSize 11
+}
+skinparam legend {
+  BackgroundColor #292e42
+  BorderColor #565f89
+  FontColor #a9b1d6
+}
+skinparam title {
+  FontColor #7aa2f7
+  FontSize 18
+}
+
+' --- sequence ---
+skinparam participant {
+  BackgroundColor #24283b
+  BorderColor #7aa2f7
+  FontColor #c0caf5
+}
+skinparam actor {
+  BackgroundColor #24283b
+  BorderColor #bb9af7
+  FontColor #c0caf5
+}
+skinparam database {
+  BackgroundColor #24283b
+  BorderColor #73daca
+  FontColor #c0caf5
+}
+skinparam sequence {
+  ArrowColor #7aa2f7
+  LifeLineBorderColor #565f89
+  LifeLineBackgroundColor #292e42
+  GroupBorderColor #565f89
+  GroupBackgroundColor #1a1b26
+  GroupHeaderFontColor #bb9af7
+  BoxBorderColor #565f89
+  BoxBackgroundColor #1a1b26
+  BoxFontColor #bb9af7
+}
+
+' --- class / object ---
+skinparam class {
+  BackgroundColor #24283b
+  BorderColor #7aa2f7
+  FontColor #c0caf5
+  HeaderBackgroundColor #292e42
+  AttributeFontColor #a9b1d6
+  StereotypeFontColor #bb9af7
+  ArrowColor #7aa2f7
+}
+skinparam interface {
+  BackgroundColor #24283b
+  BorderColor #9ece6a
+  FontColor #c0caf5
+}
+skinparam enum {
+  BackgroundColor #24283b
+  BorderColor #e0af68
+  FontColor #c0caf5
+}
+
+' --- component / deployment ---
+skinparam component {
+  BackgroundColor #24283b
+  BorderColor #7aa2f7
+  FontColor #c0caf5
+}
+skinparam node {
+  BackgroundColor #24283b
+  BorderColor #565f89
+  FontColor #c0caf5
+}
+skinparam cloud {
+  BackgroundColor #1a1b26
+  BorderColor #7aa2f7
+  FontColor #7aa2f7
+}
+skinparam frame {
+  BackgroundColor #1a1b26
+  BorderColor #565f89
+  FontColor #bb9af7
+}
+skinparam folder {
+  BackgroundColor #24283b
+  BorderColor #565f89
+  FontColor #c0caf5
+}
+skinparam rectangle {
+  BackgroundColor #24283b
+  BorderColor #565f89
+  FontColor #c0caf5
+}
+skinparam storage {
+  BackgroundColor #24283b
+  BorderColor #73daca
+  FontColor #c0caf5
+}
+skinparam queue {
+  BackgroundColor #24283b
+  BorderColor #e0af68
+  FontColor #c0caf5
+}
+
+' --- activity / state ---
+skinparam activity {
+  BackgroundColor #24283b
+  BorderColor #7aa2f7
+  FontColor #c0caf5
+  BarColor #7aa2f7
+  StartColor #9ece6a
+  EndColor #f7768e
+  DiamondBackgroundColor #292e42
+  DiamondBorderColor #e0af68
+  DiamondFontColor #c0caf5
+  ArrowColor #7aa2f7
+}
+skinparam partition {
+  BackgroundColor #1a1b26
+  BorderColor #565f89
+  FontColor #bb9af7
+}
+skinparam state {
+  BackgroundColor #24283b
+  BorderColor #7aa2f7
+  FontColor #c0caf5
+  StartColor #9ece6a
+  EndColor #f7768e
+  ArrowColor #7aa2f7
+}

@@ -68,9 +68,40 @@ function M.open(opts)
   end
 
   if vim.fn.executable(M.config.bin) == 0 then
-    vim.notify(
-      string.format("[mdp] `%s` not found in $PATH. Install: cargo install --git https://github.com/jeewangue/mdp-rs", M.config.bin),
-      vim.log.levels.ERROR
+    local install_cmd = "cargo install --git https://github.com/jeewangue/mdp-rs"
+    -- Offer to install automatically. vim.ui.select hooks into whatever picker
+    -- the user has configured (snacks.picker, telescope.ui_select, etc).
+    vim.ui.select(
+      { "install now (runs: " .. install_cmd .. ")", "copy command to clipboard", "cancel" },
+      { prompt = "[mdp] `" .. M.config.bin .. "` is not in $PATH. What to do?" },
+      function(choice)
+        if choice == nil or choice:find("cancel") then
+          return
+        end
+        if choice:find("copy") then
+          vim.fn.setreg("+", install_cmd)
+          vim.notify("[mdp] install command copied to clipboard", vim.log.levels.INFO)
+          return
+        end
+        vim.notify("[mdp] installing — this may take a minute", vim.log.levels.INFO)
+        vim.fn.jobstart(vim.split(install_cmd, " "), {
+          on_exit = function(_, code)
+            vim.schedule(function()
+              if code == 0 then
+                vim.notify(
+                  "[mdp] installed. Run :MdpOpen again (or restart nvim if cargo bin isn't in $PATH yet)",
+                  vim.log.levels.INFO
+                )
+              else
+                vim.notify(
+                  string.format("[mdp] cargo install failed (exit %d). Try running manually: %s", code, install_cmd),
+                  vim.log.levels.ERROR
+                )
+              end
+            end)
+          end,
+        })
+      end
     )
     return
   end
