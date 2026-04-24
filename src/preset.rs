@@ -302,8 +302,163 @@ additional-js = ["http://evil/x.js"]
     }
 
     #[test]
+    fn toml_string_body_escapes_all_ascii_controls() {
+        // Every byte below 0x20 (except the ones with their own escape) must
+        // come back as a \uXXXX sequence so TOML parses it. 0x7F (DEL) also
+        // should be encoded.
+        for n in 0u32..=0x1f {
+            let s = String::from(char::from_u32(n).unwrap());
+            let escaped = toml_string_body(&s);
+            // must not contain the raw control char
+            assert!(
+                !escaped.chars().any(|c| c.is_control() && c != ' '),
+                "{n:#x} not escaped: {escaped:?}"
+            );
+        }
+        // 0x7F (DEL) is a control char per char::is_control(); we escape it
+        // conservatively even though TOML's grammar doesn't strictly require it.
+        let del_escaped = toml_string_body("\x7f");
+        assert_eq!(del_escaped, "\\u007F");
+    }
+
+    #[test]
+    fn toml_string_body_roundtrips_via_toml_crate() {
+        // Anything we escape must parse back to the original string when the
+        // full TOML `"..."` wrapper is applied.
+        for input in [
+            "plain",
+            "한글",
+            "emoji 🌸",
+            r#"q"uo"tes"#,
+            "line\nbreak",
+            "\tindented",
+            "with \\ backslash",
+            "",
+        ] {
+            let wrapped = format!("v = \"{}\"", toml_string_body(input));
+            let parsed: toml::Value = toml::from_str(&wrapped)
+                .unwrap_or_else(|e| panic!("input {input:?} failed to parse: {e}"));
+            let v = parsed["v"].as_str().expect("v must be a string");
+            assert_eq!(v, input, "round-trip mismatch for {input:?}");
+        }
+    }
+
+    #[test]
+    fn toml_string_body_handles_high_plane_unicode() {
+        // Printable high-plane chars (emoji) pass through unchanged.
+        assert_eq!(toml_string_body("🌸"), "🌸");
+        assert_eq!(toml_string_body("한"), "한");
+        // U+1F338 cherry blossom is in the astral plane — TOML allows raw
+        // astral chars in basic strings. Roundtrip check.
+        let wrapped = format!("v = \"{}\"", toml_string_body("🌸 한글 and 🚀"));
+        let parsed: toml::Value = toml::from_str(&wrapped).unwrap();
+        assert_eq!(parsed["v"].as_str().unwrap(), "🌸 한글 and 🚀");
+    }
+
+    #[test]
     fn strip_controls_removes_newlines() {
         assert_eq!(strip_controls("hello\nworld"), "helloworld");
         assert_eq!(strip_controls("path with space"), "path with space");
+    }
+
+    #[test]
+    fn strip_controls_preserves_utf8() {
+        assert_eq!(strip_controls("안녕 world 🌸"), "안녕 world 🌸");
+    }
+
+    #[test]
+    fn strip_controls_removes_tab_and_null() {
+        assert_eq!(strip_controls("a\tb\0c"), "abc");
+    }
+
+    #[test]
+    fn walk_md_skips_hidden_and_noise_dirs() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        // shape:
+        //   root/
+        //     visible.md
+        //     README.md      (skipped)
+        //     .hidden/inside.md
+        //     node_modules/blah.md
+        //     target/debug/foo.md
+        //     sub/nested.md
+        std::fs::write(root.join("visible.md"), "# V").unwrap();
+        std::fs::write(root.join("README.md"), "# R").unwrap();
+        for d in [".hidden", "node_modules", "target/debug"] {
+            std::fs::create_dir_all(root.join(d)).unwrap();
+            std::fs::write(root.join(d).join("hidden.md"), "# H").unwrap();
+        }
+        std::fs::create_dir_all(root.join("sub")).unwrap();
+        std::fs::write(root.join("sub/nested.md"), "# N").unwrap();
+
+        let mut found = walk_md(root, root).unwrap();
+        found.sort();
+        let names: Vec<_> = found
+            .iter()
+            .map(|p| p.strip_prefix(root).unwrap().to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(names, vec!["sub/nested.md".to_string(), "visible.md".to_string()]);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn walk_md_rejects_symlink_outside_root() {
+        let outside = tempfile::tempdir().unwrap();
+        std::fs::write(outside.path().join("secret.md"), "# S").unwrap();
+
+        let root_dir = tempfile::tempdir().unwrap();
+        let root = root_dir.path();
+        std::fs::write(root.join("inside.md"), "# I").unwrap();
+        // Symlink from root → outside secret.md
+        std::os::unix::fs::symlink(outside.path().join("secret.md"), root.join("link.md")).unwrap();
+
+        let canonical_root = root.canonicalize().unwrap();
+        let found: Vec<_> = walk_md(root, &canonical_root)
+            .unwrap()
+            .iter()
+            .map(|p| p.file_name().unwrap().to_string_lossy().into_owned())
+            .collect();
+        // link.md MUST be rejected; inside.md allowed.
+        assert_eq!(found, vec!["inside.md".to_string()]);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn walk_md_follows_symlink_inside_root() {
+        let root_dir = tempfile::tempdir().unwrap();
+        let root = root_dir.path();
+        std::fs::write(root.join("real.md"), "# R").unwrap();
+        // symlink → sibling in same tree is fine.
+        std::os::unix::fs::symlink(root.join("real.md"), root.join("alias.md")).unwrap();
+
+        let canonical_root = root.canonicalize().unwrap();
+        let mut found: Vec<_> = walk_md(root, &canonical_root)
+            .unwrap()
+            .iter()
+            .map(|p| p.file_name().unwrap().to_string_lossy().into_owned())
+            .collect();
+        found.sort();
+        assert_eq!(found, vec!["alias.md".to_string(), "real.md".to_string()]);
+    }
+
+    #[test]
+    fn read_title_handles_leading_whitespace_and_empty_file() {
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(tmp.path(), "   # With leading spaces\ncontent\n").unwrap();
+        assert_eq!(read_title(tmp.path()).as_deref(), Some("With leading spaces"));
+
+        let tmp2 = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(tmp2.path(), "").unwrap();
+        assert_eq!(read_title(tmp2.path()), None);
+
+        let tmp3 = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(tmp3.path(), "no heading line\nwith text\n").unwrap();
+        assert_eq!(read_title(tmp3.path()), None);
+
+        // H1 somewhere after content: we pick the first H1 we see.
+        let tmp4 = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(tmp4.path(), "intro\n# Later H1\nbody\n").unwrap();
+        assert_eq!(read_title(tmp4.path()).as_deref(), Some("Later H1"));
     }
 }

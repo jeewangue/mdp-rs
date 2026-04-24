@@ -1,0 +1,17 @@
+{
+  "theme": "default",
+  "flowchart": {
+    "htmlLabels": false,
+    "useMaxWidth": true,
+    "curve": "basis"
+  },
+  "sequence": {
+    "htmlLabels": false
+  },
+  "class": {
+    "htmlLabels": false
+  },
+  "themeVariables": {
+    "fontFamily": "Noto Sans CJK KR, sans-serif"
+  }
+}

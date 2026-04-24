@@ -31,6 +31,7 @@ pub fn run(
 
     let workspace = Workspace::prepare(&dir, title)?;
     let book_toml = workspace.root.join("book.toml");
+    tracing::info!("pdf workspace at {}", workspace.root.display());
 
     // Strip mermaid/plantuml preprocessor blocks — they transform fences into
     // HTML that pandoc can't render. Our `mdp-diagrams` preprocessor
@@ -54,6 +55,20 @@ pub fn run(
     // Use lualatex + Noto Sans CJK so Korean/CJK content renders instead of crashing
     // with "character not set up for use with LaTeX".
     let profile_block: String = if pandoc_to == "latex" {
+        // LaTeX profile:
+        //   - lualatex: the only engine that renders color emoji and handles
+        //     Korean + arbitrary Unicode well.
+        //   - mainfont / CJKmainfont: Noto Sans CJK KR covers both Korean and
+        //     ASCII glyphs. Hack Nerd Font for code keeps nerdfont glyphs.
+        //   - header-includes is DELIBERATELY MINIMAL: adding fvextra or
+        //     redefining Highlighting blows up lualatex memory (multi-GB) on
+        //     realistic docs. Pandoc's defaults already wrap code lines via
+        //     `\usepackage[breaksymbolleft=..., breaklines]{fvextra}` — we
+        //     just ask pandoc to set the `highlighting-macros` variable so the
+        //     right package gets loaded.
+        //   - Color emoji rendering via Noto Color Emoji restricted to the
+        //     emoji/symbol Unicode ranges so the harfbuzz fallback only fires
+        //     for the specific codepoints that need it.
         "\n[output.pandoc]\nhosted-html = \"\"\n\n\
          [output.pandoc.profile.pdf]\n\
          output-file = \"book.pdf\"\n\
@@ -61,13 +76,36 @@ pub fn run(
          pdf-engine = \"lualatex\"\n\
          \n\
          [output.pandoc.profile.pdf.variables]\n\
-         mainfont = \"Noto Sans CJK KR\"\n\
-         sansfont = \"Noto Sans CJK KR\"\n\
          monofont = \"Hack Nerd Font Mono\"\n\
+         monofontoptions = \"Scale=0.85\"\n\
          CJKmainfont = \"Noto Sans CJK KR\"\n\
          geometry = \"margin=1in\"\n\
          fontsize = \"10pt\"\n\
-         colorlinks = true\n"
+         colorlinks = true\n\
+         linkcolor = \"Navy\"\n\
+         urlcolor = \"Navy\"\n\
+         toccolor = \"Navy\"\n\
+         header-includes = ['''\n\
+         % Emoji fallback — Noto Color Emoji via HarfBuzz. Restricted to emoji\n\
+         % / dingbat / pictograph Unicode ranges so lualatex doesn't query the\n\
+         % emoji font for every missed glyph (cheap for typical prose; slow if\n\
+         % applied to code blocks).\n\
+         %   2600-27BF   misc symbols + dingbats\n\
+         %   1F000-1FFFF emoji planes\n\
+         %   1F100-1F1FF regional indicators (flag letters)\n\
+         %\n\
+         % The main/sans font is set via \\AtEndPreamble so it runs AFTER\n\
+         % pandoc's template (which would otherwise overwrite the fallback).\n\
+         % Monospace is NOT given the fallback — HarfBuzz fallback on Verbatim\n\
+         % content is pathologically slow on large docs.\n\
+         \\usepackage{fontspec}\n\
+         \\directlua{luaotfload.add_fallback(\"emojifallback\", {\"NotoColorEmoji:mode=harf;script=dflt;ranges=1F000-1FFFF,2600-27BF,1F100-1F1FF\"})}\n\
+         \\AtEndPreamble{\n\
+           \\setmainfont{Noto Sans CJK KR}[RawFeature={fallback=emojifallback}]\n\
+           \\setsansfont{Noto Sans CJK KR}[RawFeature={fallback=emojifallback}]\n\
+         }\n\
+         \\tracinglostchars=0\n\
+         ''']\n"
             .to_string()
     } else {
         // pandoc_to is allow-listed above, so interpolation is safe.
@@ -101,6 +139,12 @@ pub fn run(
         .status()
         .context("failed to spawn mdbook build")?;
     if !status.success() {
+        if std::env::var_os("MDP_KEEP_WORKSPACE").is_some() {
+            // Leak the TempDir so the user can inspect book.toml + generated .tex / logs.
+            let root = workspace.root.clone();
+            std::mem::forget(workspace);
+            tracing::error!("preserved workspace at {} (MDP_KEEP_WORKSPACE set)", root.display());
+        }
         anyhow::bail!("mdbook build failed: {status}");
     }
 
@@ -135,6 +179,12 @@ pub fn run(
     std::fs::copy(produced, &out).with_context(|| {
         format!("failed to copy {} → {}", produced.display(), out.display())
     })?;
+
+    if std::env::var_os("MDP_KEEP_WORKSPACE").is_some() {
+        let root = workspace.root.clone();
+        std::mem::forget(workspace);
+        tracing::info!("preserved workspace at {} (MDP_KEEP_WORKSPACE set)", root.display());
+    }
 
     tracing::info!("pdf written to {}", out.canonicalize().unwrap_or(out).display());
     Ok(())
@@ -231,5 +281,67 @@ mod strip_tests {
         assert!(out.contains("[preprocessor.pagetoc]"));
         assert!(!out.contains("[preprocessor.mermaid]"));
         assert!(!out.contains("[preprocessor.plantuml]"));
+    }
+
+    #[test]
+    fn strip_is_idempotent() {
+        let input = "[output.html]\nx = 1\n\n[book]\ntitle = 't'\n";
+        let first = super::strip_sections(input, &["output.html"]);
+        let second = super::strip_sections(&first, &["output.html"]);
+        assert_eq!(first, second);
+        assert!(!first.contains("[output.html]"));
+        assert!(first.contains("[book]"));
+    }
+
+    #[test]
+    fn strip_handles_section_with_whitespace_prefix() {
+        // Sub-table definitions sometimes have leading whitespace when the
+        // file is hand-formatted. Our matcher should still find them.
+        let input = "  [preprocessor.foo]\nkey = 1\n[book]\n";
+        let out = super::strip_sections(input, &["preprocessor.foo"]);
+        assert!(!out.contains("[preprocessor.foo]"));
+        assert!(out.contains("[book]"));
+    }
+
+    #[test]
+    fn strip_drops_everything_until_next_header() {
+        // By design: comments/blank lines between a stripped header and the
+        // next header are part of the stripped section and go with it.
+        // Callers that want to preserve comments should put them AFTER the
+        // next section header.
+        let input = "[drop]\na = 1\n\n# comment-belongs-to-drop\n[keep]\nb = 2\n# comment-belongs-to-keep\n";
+        let out = super::strip_sections(input, &["drop"]);
+        assert!(!out.contains("[drop]"));
+        assert!(!out.contains("comment-belongs-to-drop"));
+        assert!(out.contains("[keep]"));
+        assert!(out.contains("b = 2"));
+        assert!(out.contains("comment-belongs-to-keep"));
+    }
+
+    #[test]
+    fn strip_empty_input_is_empty() {
+        assert_eq!(super::strip_sections("", &["anything"]), "");
+    }
+
+    #[test]
+    fn strip_no_match_returns_unchanged_content() {
+        let input = "[a]\nx=1\n\n[b]\ny=2\n";
+        let out = super::strip_sections(input, &["c"]);
+        // `strip_sections` normalizes trailing newline — compare semantically.
+        assert!(out.contains("[a]"));
+        assert!(out.contains("x=1"));
+        assert!(out.contains("[b]"));
+        assert!(out.contains("y=2"));
+    }
+
+    #[test]
+    fn strip_preprocessor_blocks_maps_names_correctly() {
+        let input = "[preprocessor.mermaid]\nx=1\n[preprocessor.plantumlextra]\ny=2\n";
+        // We should NOT strip `preprocessor.plantumlextra` even though it
+        // starts with "plantuml" — strict equality for the top-level section
+        // name (dot match is whole-segment).
+        let out = super::strip_preprocessor_blocks(input, &["mermaid", "plantuml"]);
+        assert!(!out.contains("[preprocessor.mermaid]"));
+        assert!(out.contains("[preprocessor.plantumlextra]"));
     }
 }

@@ -98,4 +98,44 @@ mod tests {
         assert!(validate_plantuml_server("http://example.com").is_ok());
         assert!(validate_plantuml_server("https://www.plantuml.com/plantuml").is_ok());
     }
+
+    #[test]
+    fn plantuml_rejects_control_chars_even_with_http_prefix() {
+        // A URL that starts with http but contains a newline — the scheme check
+        // alone isn't enough.
+        assert!(validate_plantuml_server("https://ok\nmalicious").is_err());
+        assert!(validate_plantuml_server("http://ok\tevil").is_err());
+    }
+
+    #[test]
+    fn reject_control_chars_catches_all_below_0x20() {
+        for c in 0u32..=0x1f {
+            let s = String::from(char::from_u32(c).unwrap());
+            // 0x20 is the space char and should pass; everything below is a
+            // control char and must be rejected.
+            if c == 0x00 && s == " " {
+                continue;
+            }
+            assert!(
+                reject_control_chars(&s, "x").is_err(),
+                "{c:#x} should have been rejected"
+            );
+        }
+        // space and non-control chars pass
+        assert!(reject_control_chars(" ", "x").is_ok());
+        assert!(reject_control_chars("a b c", "x").is_ok());
+        assert!(reject_control_chars("한글", "x").is_ok());
+    }
+
+    #[test]
+    fn reject_control_chars_catches_embedded_control_in_long_string() {
+        let s = format!("{}{}{}", "a".repeat(50), '\u{7}', "b".repeat(50));
+        assert!(reject_control_chars(&s, "x").is_err());
+    }
+
+    #[test]
+    fn plantuml_rejects_empty_and_unicode_only() {
+        assert!(validate_plantuml_server("").is_err());
+        assert!(validate_plantuml_server("한글://server").is_err());
+    }
 }
