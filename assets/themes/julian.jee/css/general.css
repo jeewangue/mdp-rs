@@ -36,7 +36,11 @@
 .content h3 { font-size: 1.5em;  line-height: 1.43; }
 .content h4 { font-size: 1.25em; }
 .content h5 { font-size: 1em; }
-.content h6 { font-size: 1em; color: var(--fg-muted); }
+/* H6: explicit high-specificity override — mdbook default has `.content h6` too
+ * so we match specificity and win by load-order (general.css is loaded last). */
+.content h6,
+.julian-jee-dark .content h6,
+.julian-jee .content h6 { font-size: 1em; color: var(--julianjee-h6); }
 
 /* strong — teal (signature color) */
 .content strong {

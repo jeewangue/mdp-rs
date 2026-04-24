@@ -61,6 +61,25 @@ enum Commands {
         title: Option<String>,
     },
 
+    /// Build a single PDF via mdbook-pandoc.
+    Pdf {
+        /// Source directory of markdown files.
+        dir: std::path::PathBuf,
+
+        /// Output PDF path.
+        #[arg(short, long, default_value = "./book.pdf")]
+        out: std::path::PathBuf,
+
+        /// Book title.
+        #[arg(short, long)]
+        title: Option<String>,
+
+        /// Pandoc output format (latex → PDF via LaTeX, html5 → self-contained HTML, etc).
+        /// Default is latex; set to `html` for an HTML single-file.
+        #[arg(long, default_value = "latex")]
+        pandoc_to: String,
+    },
+
     /// Install required mdbook preprocessors via cargo install.
     InstallDeps {
         /// Force reinstall even if already present.
@@ -85,6 +104,9 @@ fn main() -> Result<()> {
             commands::serve::run(dir, port, host, open, title)
         }
         Commands::Build { dir, out, title } => commands::build::run(dir, out, title),
+        Commands::Pdf { dir, out, title, pandoc_to } => {
+            commands::pdf::run(dir, out, title, pandoc_to)
+        }
         Commands::InstallDeps { force } => commands::install::run(force),
         Commands::DumpAssets => commands::dump::run(),
     }
