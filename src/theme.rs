@@ -11,15 +11,3 @@ use rust_embed::RustEmbed;
 #[prefix = ""]
 pub struct Assets;
 
-/// Extract every asset into `dst`, preserving relative paths.
-pub fn extract_to(dst: &std::path::Path) -> anyhow::Result<()> {
-    for path in Assets::iter() {
-        let file = Assets::get(&path).expect("embed path must resolve");
-        let target = dst.join(path.as_ref());
-        if let Some(parent) = target.parent() {
-            std::fs::create_dir_all(parent)?;
-        }
-        std::fs::write(&target, file.data.as_ref())?;
-    }
-    Ok(())
-}

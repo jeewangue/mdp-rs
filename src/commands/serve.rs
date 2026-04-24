@@ -1,4 +1,5 @@
 use anyhow::{Context, Result};
+use std::net::IpAddr;
 use std::path::PathBuf;
 use std::process::Command;
 
@@ -12,6 +13,19 @@ pub fn run(
     title: Option<String>,
 ) -> Result<()> {
     ensure_deps()?;
+
+    // Defense against accidental LAN exposure: --host must be a parseable IP
+    // address. If it's non-loopback we require $MDP_ALLOW_NON_LOOPBACK=1 as an
+    // explicit opt-in — otherwise a stray `--host 0.0.0.0` would silently
+    // publish the user's notes on coffee-shop WiFi.
+    let host_ip: IpAddr = host
+        .parse()
+        .with_context(|| format!("--host must be an IP address, got {host:?}"))?;
+    if !host_ip.is_loopback() && std::env::var_os("MDP_ALLOW_NON_LOOPBACK").is_none() {
+        anyhow::bail!(
+            "refusing to bind non-loopback {host_ip}; set MDP_ALLOW_NON_LOOPBACK=1 to override"
+        );
+    }
 
     let workspace = Workspace::prepare(&dir, title)?;
     tracing::info!("prepared workspace at {}", workspace.root.display());
@@ -38,26 +52,57 @@ pub fn run(
         port
     );
 
-    let mut cmd = Command::new("mdbook");
-    cmd.arg("serve")
-        .arg(&workspace.root)
-        .arg("-p")
-        .arg(port.to_string())
-        .arg("-n")
-        .arg(&host);
     if open {
         // We open the browser ourselves after a short delay so the user can see which
         // URL mdp is on, and we don't rely on mdbook's own --open semantics.
-        let url = format!("http://{host}:{port}/");
+        // IPv6 addresses need square brackets in the URL authority component.
+        let url = if host_ip.is_ipv6() {
+            format!("http://[{host_ip}]:{port}/")
+        } else {
+            format!("http://{host_ip}:{port}/")
+        };
         std::thread::spawn(move || {
             std::thread::sleep(std::time::Duration::from_millis(1200));
             let _ = opener::open(&url);
         });
     }
 
-    let status = cmd.status().context("failed to spawn `mdbook serve`")?;
+    let mut child = Command::new("mdbook")
+        .arg("serve")
+        .arg(&workspace.root)
+        .arg("-p")
+        .arg(port.to_string())
+        .arg("-n")
+        .arg(&host)
+        .spawn()
+        .context("failed to spawn `mdbook serve`")?;
+
+    // On SIGINT / SIGTERM, kill the child so mdbook doesn't outlive mdp. The Drop
+    // on `workspace` then runs and cleans the tmpdir — otherwise we'd leak
+    // `/tmp/mdp-*` forever (security review finding #5).
+    let child_id = child.id();
+    ctrlc::set_handler(move || {
+        // best-effort: send SIGTERM to the child PID. If it doesn't exit within a
+        // couple seconds, the OS will reap it when mdp itself exits below.
+        #[cfg(unix)]
+        {
+            use nix::sys::signal::{Signal, kill};
+            use nix::unistd::Pid;
+            let _ = kill(Pid::from_raw(child_id as i32), Signal::SIGTERM);
+        }
+        #[cfg(not(unix))]
+        {
+            // Windows: rely on OS to clean up on mdp's exit.
+            let _ = child_id;
+        }
+    })
+    .context("failed to install SIGINT/SIGTERM handler")?;
+
+    let status = child.wait().context("mdbook serve was not running")?;
+    drop(workspace); // explicit: triggers TempDir cleanup
     if !status.success() {
-        anyhow::bail!("mdbook serve exited with {status}");
+        // On SIGTERM mdbook exits non-zero by convention — don't treat that as error.
+        tracing::info!("mdbook serve exited with {status}");
     }
     Ok(())
 }

@@ -9,7 +9,7 @@ full-text search.
 ## Install
 
 ```sh
-cargo install --git https://gitlab.com/julian.jee/mdp-rs
+cargo install --git https://github.com/jeewangue/mdp-rs
 mdp install-deps     # cargo installs required mdbook preprocessors
 ```
 

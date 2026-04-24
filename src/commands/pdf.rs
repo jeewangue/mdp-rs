@@ -23,26 +23,41 @@ pub fn run(
         .append(true)
         .open(&book_toml)
         .context("failed to open book.toml for append")?;
+    // Allow-list: pandoc-to is interpolated into a TOML value, so we reject
+    // anything that isn't a recognized output format. (Without this, a payload
+    // like `latex"\n[output.evil]` could inject arbitrary TOML keys.)
+    const ALLOWED_PANDOC_TO: &[&str] = &[
+        "latex", "html", "html5", "pdf", "docx", "epub", "epub3",
+        "markdown", "markdown_strict", "markdown_github", "gfm",
+        "plain", "rst", "commonmark", "commonmark_x",
+    ];
+    if !ALLOWED_PANDOC_TO.contains(&pandoc_to.as_str()) {
+        anyhow::bail!(
+            "unsupported --pandoc-to {pandoc_to:?}; allowed: {}",
+            ALLOWED_PANDOC_TO.join(", ")
+        );
+    }
+
     // Use lualatex + Noto Sans CJK so Korean/CJK content renders instead of crashing
     // with "character not set up for use with LaTeX".
-    let profile_block = if pandoc_to == "latex" {
-        format!(
-            "\n[output.pandoc]\nhosted-html = \"\"\n\n\
-             [output.pandoc.profile.pdf]\n\
-             output-file = \"book.pdf\"\n\
-             to = \"latex\"\n\
-             pdf-engine = \"lualatex\"\n\
-             \n\
-             [output.pandoc.profile.pdf.variables]\n\
-             mainfont = \"Noto Sans CJK KR\"\n\
-             sansfont = \"Noto Sans CJK KR\"\n\
-             monofont = \"Hack Nerd Font Mono\"\n\
-             CJKmainfont = \"Noto Sans CJK KR\"\n\
-             geometry = \"margin=1in\"\n\
-             fontsize = \"10pt\"\n\
-             colorlinks = true\n"
-        )
+    let profile_block: String = if pandoc_to == "latex" {
+        "\n[output.pandoc]\nhosted-html = \"\"\n\n\
+         [output.pandoc.profile.pdf]\n\
+         output-file = \"book.pdf\"\n\
+         to = \"latex\"\n\
+         pdf-engine = \"lualatex\"\n\
+         \n\
+         [output.pandoc.profile.pdf.variables]\n\
+         mainfont = \"Noto Sans CJK KR\"\n\
+         sansfont = \"Noto Sans CJK KR\"\n\
+         monofont = \"Hack Nerd Font Mono\"\n\
+         CJKmainfont = \"Noto Sans CJK KR\"\n\
+         geometry = \"margin=1in\"\n\
+         fontsize = \"10pt\"\n\
+         colorlinks = true\n"
+            .to_string()
     } else {
+        // pandoc_to is allow-listed above, so interpolation is safe.
         format!(
             "\n[output.pandoc]\nhosted-html = \"\"\n\n\
              [output.pandoc.profile.pdf]\n\
@@ -91,10 +106,10 @@ pub fn run(
             )
         })?;
 
-    if let Some(parent) = out.parent() {
-        if !parent.as_os_str().is_empty() {
-            std::fs::create_dir_all(parent)?;
-        }
+    if let Some(parent) = out.parent()
+        && !parent.as_os_str().is_empty()
+    {
+        std::fs::create_dir_all(parent)?;
     }
     std::fs::copy(produced, &out).with_context(|| {
         format!("failed to copy {} → {}", produced.display(), out.display())

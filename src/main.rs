@@ -1,3 +1,5 @@
+#![forbid(unsafe_code)]
+
 use anyhow::Result;
 use clap::{Parser, Subcommand};
 use tracing_subscriber::EnvFilter;

@@ -1,6 +1,6 @@
 # mdp.nvim
 
-Companion Neovim Lua plugin for the [mdp](https://gitlab.com/julian.jee/mdp-rs)
+Companion Neovim Lua plugin for the [mdp](https://github.com/jeewangue/mdp-rs)
 CLI. Spawns `mdp serve <dir>` as a backgrounded job so you can preview the
 current buffer's directory in a browser while you edit.
 
@@ -12,7 +12,7 @@ No buffer-level live sync — on `:w`, mdbook's file watcher reloads the browser
 
 ```lua
 {
-  url = "https://gitlab.com/julian.jee/mdp-rs",
+  url = "https://github.com/jeewangue/mdp-rs",
   -- the nvim plugin lives in the nvim/ subdirectory of the repo
   config = function()
     -- adjust rtp if your plugin manager doesn't auto-discover nvim/
@@ -44,5 +44,5 @@ No buffer-level live sync — on `:w`, mdbook's file watcher reloads the browser
 ## Requirements
 
 - Neovim 0.9+
-- `mdp` binary in `$PATH` (install via `cargo install --git https://gitlab.com/julian.jee/mdp-rs`)
+- `mdp` binary in `$PATH` (install via `cargo install --git https://github.com/jeewangue/mdp-rs`)
 - The mdbook preprocessors `mdp install-deps` installs

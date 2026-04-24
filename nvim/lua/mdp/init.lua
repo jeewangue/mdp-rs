@@ -69,7 +69,7 @@ function M.open(opts)
 
   if vim.fn.executable(M.config.bin) == 0 then
     vim.notify(
-      string.format("[mdp] `%s` not found in $PATH. Install: cargo install --git https://gitlab.com/julian.jee/mdp-rs", M.config.bin),
+      string.format("[mdp] `%s` not found in $PATH. Install: cargo install --git https://github.com/jeewangue/mdp-rs", M.config.bin),
       vim.log.levels.ERROR
     )
     return
