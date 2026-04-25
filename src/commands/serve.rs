@@ -1,9 +1,13 @@
 use anyhow::{Context, Result};
-use std::net::IpAddr;
+use std::net::{IpAddr, SocketAddr, TcpListener};
 use std::path::PathBuf;
 use std::process::Command;
 
 use crate::preset::Workspace;
+
+/// How many sequential ports to try after the requested one before giving up.
+/// 16 covers "every nvim window in a typical session" with room to spare.
+const PORT_FALLBACK_RANGE: u16 = 16;
 
 pub fn run(
     dir: PathBuf,
@@ -27,6 +31,21 @@ pub fn run(
         );
     }
 
+    // Pick a port: prefer the requested one, but fall back to the next free
+    // one if it's in use. This is what makes `:MdpOpen` from a second nvim
+    // window work — the first claims 3456, the second auto-shifts to 3457.
+    //
+    // We bind+drop a TcpListener as a probe rather than calling `mdbook serve`
+    // and parsing failure modes. There's a tiny TOCTOU window between probe
+    // and mdbook actually binding, but for a local dev tool that's acceptable
+    // (worst case the user retries `:MdpOpen`).
+    let port = pick_free_port(host_ip, port).with_context(|| {
+        format!(
+            "no free port in [{port}, {})",
+            port.saturating_add(PORT_FALLBACK_RANGE)
+        )
+    })?;
+
     let workspace = Workspace::prepare(&dir, title)?;
     tracing::info!("prepared workspace at {}", workspace.root.display());
 
@@ -38,13 +57,9 @@ pub fn run(
         "mdbook-mermaid install",
     )?;
 
-    // mdbook-pagetoc doesn't support `install` subcommand — copy its assets manually
-    // from the extracted pagetoc crate's distribution (we ship a tiny fallback in
-    // assets/themes/julian.jee/pagetoc/ if we need to). For now we rely on the user
-    // having `mdbook-pagetoc`'s assets available; if missing we skip with a warning.
-    // (The pagetoc preprocessor binary emits inline markup that doesn't strictly need
-    // css/js to be present — the left sidebar still shows headings.)
-
+    // Print a stable, parseable line so the nvim plugin can find the URL even
+    // when the port shifted from the requested default.
+    println!("mdp: serving on http://{host}:{port}/");
     tracing::info!(
         "serving {} on http://{}:{}",
         workspace.src.display(),
@@ -129,4 +144,71 @@ fn run_cmd(cmd: &mut Command, label: &str) -> Result<()> {
         anyhow::bail!("{label} exited with {status}");
     }
     Ok(())
+}
+
+/// Return a free port in the range `[requested, requested + PORT_FALLBACK_RANGE)`.
+/// If the requested port itself is free, returns it unchanged. Otherwise warns
+/// and returns the next available one. Errors only when the entire window is
+/// taken.
+fn pick_free_port(host: IpAddr, requested: u16) -> Result<u16> {
+    let max = requested.saturating_add(PORT_FALLBACK_RANGE);
+    for candidate in requested..max {
+        if is_port_free(host, candidate) {
+            if candidate != requested {
+                tracing::warn!(
+                    "port {requested} in use, using {candidate} instead"
+                );
+            }
+            return Ok(candidate);
+        }
+    }
+    anyhow::bail!("no free port in [{requested}, {max})")
+}
+
+fn is_port_free(host: IpAddr, port: u16) -> bool {
+    // bind + immediately drop: closes the listener but tells us the port is
+    // available right now. SO_REUSEADDR is intentionally NOT set — if it were,
+    // we could double-bind a port held in TIME_WAIT and confuse mdbook.
+    TcpListener::bind(SocketAddr::new(host, port)).is_ok()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::net::{IpAddr, Ipv4Addr};
+
+    fn loopback() -> IpAddr {
+        IpAddr::V4(Ipv4Addr::LOCALHOST)
+    }
+
+    #[test]
+    fn pick_free_port_returns_requested_when_free() {
+        // Use a high random-ish port that's almost certainly free in CI.
+        // OS will sometimes still take it; in that case the fallback should
+        // pick a near neighbor — assert we get *something* in the window.
+        let requested = 49_152; // start of dynamic/private port range
+        let chosen = pick_free_port(loopback(), requested).unwrap();
+        assert!((requested..requested + PORT_FALLBACK_RANGE).contains(&chosen));
+    }
+
+    #[test]
+    fn pick_free_port_skips_busy_port() {
+        // Bind one port, then ask for it. Should fall through to next free.
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let busy = listener.local_addr().unwrap().port();
+        let chosen = pick_free_port(loopback(), busy).unwrap();
+        assert_ne!(chosen, busy, "should have skipped the bound port");
+        assert!(
+            (busy..busy.saturating_add(PORT_FALLBACK_RANGE)).contains(&chosen),
+            "chosen port {chosen} not in fallback window starting at {busy}"
+        );
+    }
+
+    #[test]
+    fn pick_free_port_window_constants_are_sane() {
+        // Guard against `PORT_FALLBACK_RANGE = 0` — the function would
+        // immediately bail without trying anything. We want at least 4
+        // fallback slots.
+        const _: () = assert!(PORT_FALLBACK_RANGE >= 4);
+    }
 }

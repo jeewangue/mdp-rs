@@ -28,6 +28,13 @@ local job_id = nil
 ---@type string|nil
 local serving_dir = nil
 
+---@type string|nil
+-- The actual URL mdp is serving at. May differ from the configured default if
+-- the requested port was already taken (e.g. another nvim window is also
+-- running mdp). Set when we see "mdp: serving on http://..." in the job
+-- output; nil until then.
+local serving_url = nil
+
 local function default_root_finder(buf)
   local bufname = vim.api.nvim_buf_get_name(buf)
   if bufname == "" then
@@ -46,6 +53,12 @@ local function is_running()
 end
 
 local function url()
+  -- Prefer the URL mdp actually printed (it auto-falls-back to a free port
+  -- if the configured one was taken). Until that arrives, show the
+  -- requested URL as a best-guess.
+  if serving_url ~= nil then
+    return serving_url
+  end
   return string.format("http://%s:%d/", M.config.host, M.config.port)
 end
 
@@ -117,11 +130,22 @@ function M.open(opts)
     table.insert(cmd, "--open")
   end
 
+  -- Match `mdp: serving on http://…/` from stdout so we can recover the
+  -- actual port (mdp falls back to the next free port when ours is taken).
+  local function capture_url(line)
+    local found = line:match("mdp: serving on (https?://[%w%-%.:%[%]/]+)")
+    if found then
+      serving_url = found
+      vim.notify("[mdp] " .. found, vim.log.levels.INFO)
+    end
+  end
+
   job_id = vim.fn.jobstart(cmd, {
     detach = false,
     on_stdout = function(_, data, _)
       for _, line in ipairs(data or {}) do
         if line ~= "" then
+          capture_url(line)
           vim.schedule(function()
             vim.notify("[mdp] " .. line, vim.log.levels.INFO)
           end)
@@ -131,6 +155,7 @@ function M.open(opts)
     on_stderr = function(_, data, _)
       for _, line in ipairs(data or {}) do
         if line ~= "" then
+          capture_url(line)
           vim.schedule(function()
             -- mdbook uses stderr for INFO logs — show as info, not error.
             vim.notify("[mdp] " .. line, vim.log.levels.INFO)
@@ -148,6 +173,7 @@ function M.open(opts)
         end
         job_id = nil
         serving_dir = nil
+        serving_url = nil
       end)
     end,
   })
