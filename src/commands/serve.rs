@@ -57,6 +57,28 @@ pub fn run(
         "mdbook-mermaid install",
     )?;
 
+    // For HTML serve mode we want OUR plantuml renderer (with the tokyonight
+    // skinparam header), not mdbook-plantuml's stock output. Strip the latter
+    // and register `mdp preprocess` instead.
+    let book_toml = workspace.root.join("book.toml");
+    let existing = std::fs::read_to_string(&book_toml).context("read book.toml")?;
+    let filtered = strip_preprocessor_blocks(&existing, &["plantuml"]);
+    std::fs::write(&book_toml, filtered).context("rewrite book.toml")?;
+
+    let self_exe = std::env::current_exe()
+        .context("failed to resolve current mdp executable path")?;
+    let mut f = std::fs::OpenOptions::new()
+        .append(true)
+        .open(&book_toml)
+        .context("open book.toml for append")?;
+    use std::io::Write as _;
+    writeln!(
+        f,
+        "\n[preprocessor.mdp-diagrams]\ncommand = \"{} preprocess\"",
+        crate::preset::toml_string_body_public(&self_exe.display().to_string())
+    )?;
+    drop(f);
+
     // Print a stable, parseable line so the nvim plugin can find the URL even
     // when the port shifted from the requested default.
     println!("mdp: serving on http://{host}:{port}/");
@@ -120,6 +142,37 @@ pub fn run(
         tracing::info!("mdbook serve exited with {status}");
     }
     Ok(())
+}
+
+/// Remove `[preprocessor.<name>]` blocks (and any nested subsections like
+/// `[preprocessor.<name>.foo]`) from a book.toml. Shared with the pdf path's
+/// stripper — kept inline here to avoid a circular module dep.
+fn strip_preprocessor_blocks(toml: &str, names: &[&str]) -> String {
+    let keys: Vec<String> = names.iter().map(|n| format!("preprocessor.{n}")).collect();
+    let key_refs: Vec<&str> = keys.iter().map(String::as_str).collect();
+    let mut out = String::with_capacity(toml.len());
+    let mut drop_current = false;
+    for line in toml.lines() {
+        let stripped = line.trim_start();
+        if stripped.starts_with('[') && stripped.ends_with(']') {
+            let inner = &stripped[1..stripped.len() - 1];
+            drop_current = key_refs
+                .iter()
+                .any(|k| inner == *k || inner.starts_with(&format!("{k}.")));
+            if drop_current {
+                continue;
+            }
+            out.push_str(line);
+            out.push('\n');
+            continue;
+        }
+        if drop_current {
+            continue;
+        }
+        out.push_str(line);
+        out.push('\n');
+    }
+    out
 }
 
 fn ensure_deps() -> Result<()> {

@@ -1,15 +1,24 @@
-//! mdbook preprocessor — renders `plantuml` and `mermaid` fences to SVG files
-//! and replaces them with `![alt](path)` image refs. Only activates for the
-//! `pandoc` renderer so the HTML path keeps using mdbook-mermaid / mdbook-plantuml
-//! (which render client-side).
+//! mdbook preprocessor — renders `plantuml` (and, for the pandoc renderer,
+//! `mermaid`) fences to images that get embedded as `![alt](data:...)` data
+//! URIs in the markdown.
+//!
+//! Why per-renderer behavior:
+//! - **HTML serve**: replace plantuml fences ourselves so the tokyonight
+//!   skinparam header is applied (`mdbook-plantuml` would otherwise call the
+//!   public PlantUML server with no theme). Mermaid fences are LEFT ALONE so
+//!   `mdbook-mermaid`'s client-side renderer keeps producing crisp vector SVG
+//!   with theming via `themes/mermaid-config.json`.
+//! - **PDF / pandoc**: replace BOTH plantuml and mermaid fences. Pandoc's
+//!   LaTeX pipeline can't run JS for client-side mermaid, and mdbook-plantuml
+//!   inline-svg output confuses pandoc's image embedding.
 //!
 //! Protocol reference: https://rust-lang.github.io/mdBook/for_developers/preprocessors.html
 //!
-//!   mdp preprocess supports <renderer>   # exit 0 if we transform for that renderer
-//!   mdp preprocess                       # read [ctx, book] JSON from stdin,
-//!                                        # write transformed book JSON to stdout
+//!   mdp preprocess supports <renderer>   # exit 0 if we transform for it
+//!   mdp preprocess                       # read [ctx, book] JSON from stdin
 
 use anyhow::{Context, Result};
+use base64::Engine;
 use serde_json::{Value, json};
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
@@ -17,45 +26,65 @@ use std::process::{Command, Stdio};
 
 use crate::theme::Assets;
 
+/// Which fence kinds should we transform for a given renderer?
+#[derive(Copy, Clone, Debug)]
+struct TransformPolicy {
+    plantuml: bool,
+    mermaid: bool,
+}
+
+impl TransformPolicy {
+    fn for_renderer(renderer: &str) -> Self {
+        match renderer {
+            // HTML: only plantuml (mdbook-mermaid handles mermaid client-side).
+            "html" => Self { plantuml: true, mermaid: false },
+            // PDF: both — pandoc can't execute mermaid's client-side JS.
+            "pandoc" => Self { plantuml: true, mermaid: true },
+            // Unknown renderer — should not happen because mdbook only invokes
+            // us for renderers we claimed in `supports`. Default to no-op.
+            _ => Self { plantuml: false, mermaid: false },
+        }
+    }
+}
+
 /// Entry point. `supports_arg` is whatever mdbook passed as argv[1].
 pub fn run(supports_arg: Option<String>, renderer: Option<String>) -> Result<()> {
     match supports_arg.as_deref() {
         Some("supports") => {
-            // Only claim support for pandoc. HTML renderer uses mdbook-mermaid /
-            // mdbook-plantuml client-side; inserting pre-rendered SVGs there would
-            // duplicate work and lose interactivity.
             let target = renderer.unwrap_or_default();
-            if target == "pandoc" {
+            if matches!(target.as_str(), "html" | "pandoc") {
                 std::process::exit(0);
             }
             std::process::exit(1);
         }
         None => {
-            // Run the transform.
             let mut buf = String::new();
             std::io::stdin().read_to_string(&mut buf).context("read stdin")?;
 
             let input: Value = serde_json::from_str(&buf).context("parse preprocessor input")?;
-            // input is `[context, book]`.
             let context = input.get(0).cloned().unwrap_or(Value::Null);
             let mut book = input.get(1).cloned().unwrap_or(json!({}));
 
-            // Directory where we spill SVGs. We put them inside the book root so
-            // relative links from markdown → SVG survive pandoc's resolution.
-            // `context.root` is the book root (dir containing book.toml).
             let book_root = context
                 .get("root")
                 .and_then(|v| v.as_str())
                 .map(PathBuf::from)
                 .context("preprocessor context missing `root`")?;
-            let diagrams_dir = book_root.join("diagrams");
-            std::fs::create_dir_all(&diagrams_dir)?;
+            let renderer = context
+                .get("renderer")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
+            let policy = TransformPolicy::for_renderer(&renderer);
 
-            // Walk the book's section tree in place. mdbook's JSON uses
-            // "items" at the top level (Book::items), not "sections".
+            // Cache rendered images on disk so re-builds are fast. The dir
+            // sits next to the book root, NOT inside the user's source tree.
+            let cache_dir = book_root.join(".mdp-diagram-cache");
+            std::fs::create_dir_all(&cache_dir)?;
+
             if let Some(items) = book.get_mut("items").and_then(|s| s.as_array_mut()) {
                 for item in items.iter_mut() {
-                    transform_section(item, &diagrams_dir)?;
+                    transform_section(item, &cache_dir, policy)?;
                 }
             }
 
@@ -71,16 +100,19 @@ pub fn run(supports_arg: Option<String>, renderer: Option<String>) -> Result<()>
     }
 }
 
-fn transform_section(section: &mut Value, diagrams_dir: &Path) -> Result<()> {
-    // mdbook's BookItem variants: {"Chapter": {...}}, {"Separator": null}, {"PartTitle": "..."}
+fn transform_section(
+    section: &mut Value,
+    cache_dir: &Path,
+    policy: TransformPolicy,
+) -> Result<()> {
     if let Some(chapter) = section.get_mut("Chapter") {
         if let Some(content) = chapter.get_mut("content").and_then(|c| c.as_str()) {
-            let transformed = transform_markdown(content, diagrams_dir)?;
+            let transformed = transform_markdown(content, cache_dir, policy)?;
             chapter["content"] = Value::String(transformed);
         }
         if let Some(sub) = chapter.get_mut("sub_items").and_then(|s| s.as_array_mut()) {
             for item in sub.iter_mut() {
-                transform_section(item, diagrams_dir)?;
+                transform_section(item, cache_dir, policy)?;
             }
         }
     }
@@ -92,13 +124,20 @@ fn transform_section(section: &mut Value, diagrams_dir: &Path) -> Result<()> {
 /// - Leading whitespace on the fence (common in nested lists).
 /// - Language identifier followed by more attributes (e.g. ```mermaid {theme=dark}).
 /// - Both LF and CRLF line endings (str::lines handles both).
-fn transform_markdown(src: &str, diagrams_dir: &Path) -> Result<String> {
+fn transform_markdown(src: &str, cache_dir: &Path, policy: TransformPolicy) -> Result<String> {
     let mut out = String::with_capacity(src.len());
     let mut lines = src.lines().peekable();
 
     while let Some(line) = lines.next() {
         let trimmed = line.trim_start();
-        let kind = fence_kind(trimmed);
+        let kind_unfiltered = fence_kind(trimmed);
+        // Apply the per-renderer policy: HTML only transforms plantuml so
+        // mdbook-mermaid keeps owning mermaid blocks for client-side render.
+        let kind = match kind_unfiltered {
+            Some(DiagramKind::PlantUml) if policy.plantuml => Some(DiagramKind::PlantUml),
+            Some(DiagramKind::Mermaid) if policy.mermaid => Some(DiagramKind::Mermaid),
+            _ => None,
+        };
 
         match kind {
             Some(k) => {
@@ -120,23 +159,20 @@ fn transform_markdown(src: &str, diagrams_dir: &Path) -> Result<String> {
                     continue;
                 }
 
-                match render_diagram(k, &body, diagrams_dir) {
-                    Ok(svg_path) => {
-                        // Use absolute path — pandoc's LaTeX pipeline resolves
-                        // relative paths from each chapter's location, which we
-                        // don't know here.
+                match render_diagram(k, &body, cache_dir) {
+                    Ok((mime, bytes)) => {
+                        // Embed as a data URI. Works in both HTML (browser-
+                        // rendered <img>) and PDF (pandoc base64-decodes back
+                        // to a temp file). Avoids "where do I put the SVG so
+                        // both renderers can find it" pathing headaches.
                         let alt = match k {
                             DiagramKind::PlantUml => "plantuml diagram",
                             DiagramKind::Mermaid => "mermaid diagram",
                         };
-                        out.push_str(&format!(
-                            "![{alt}]({})\n",
-                            svg_path.display()
-                        ));
+                        let b64 = base64::engine::general_purpose::STANDARD.encode(&bytes);
+                        out.push_str(&format!("![{alt}](data:{mime};base64,{b64})\n"));
                     }
                     Err(e) => {
-                        // Rendering failed — emit original fence + a comment so
-                        // the PDF shows SOMETHING rather than a crashing build.
                         eprintln!("[mdp preprocess] diagram render failed: {e}");
                         out.push_str(line);
                         out.push('\n');
@@ -184,31 +220,42 @@ fn fence_kind(line: &str) -> Option<DiagramKind> {
     }
 }
 
-fn render_diagram(kind: DiagramKind, body: &str, diagrams_dir: &Path) -> Result<PathBuf> {
+/// Render `body` to bytes, returning (MIME type, image bytes). Uses a
+/// content-addressed file cache in `cache_dir` so a re-build with unchanged
+/// fences is instant.
+fn render_diagram(
+    kind: DiagramKind,
+    body: &str,
+    cache_dir: &Path,
+) -> Result<(&'static str, Vec<u8>)> {
     let hash = blake3::hash(body.as_bytes()).to_hex();
-    let (ext, name) = match kind {
-        // PlantUML → SVG (rsvg-convert handles plantuml's plain <text> elements fine).
-        DiagramKind::PlantUml => ("svg", format!("plantuml-{}.svg", &hash[..16])),
-        // Mermaid v11 still emits <foreignObject> with HTML labels by default and
-        // there's no reliable `htmlLabels: false` for every diagram type. PNG
-        // output rasterises the full browser-rendered diagram (text + fonts)
-        // so pdflatex can include it. We lose vector sharpness but gain
-        // guaranteed correctness for Korean / emoji / node labels.
-        DiagramKind::Mermaid => ("png", format!("mermaid-{}.png", &hash[..16])),
+    let (mime, name) = match kind {
+        // PlantUML → SVG. Plantuml outputs plain `<text>` elements, so it
+        // embeds cleanly into both HTML and PDF without rasterisation.
+        DiagramKind::PlantUml => (
+            "image/svg+xml",
+            format!("plantuml-{}.svg", &hash[..16]),
+        ),
+        // Mermaid v11 still emits `<foreignObject>` for labels by default and
+        // there's no reliable `htmlLabels: false` switch for all diagram
+        // types — pandoc's LaTeX pipeline drops the foreignObject text.
+        // Rasterising to PNG ensures Korean / emoji / labels survive PDF
+        // embedding.
+        DiagramKind::Mermaid => ("image/png", format!("mermaid-{}.png", &hash[..16])),
     };
-    let out = diagrams_dir.join(name);
+    let cache_path = cache_dir.join(name);
 
-    // Idempotent cache: if already rendered, reuse.
-    if out.exists() {
-        return Ok(out);
+    if let Ok(bytes) = std::fs::read(&cache_path) {
+        return Ok((mime, bytes));
     }
 
     match kind {
-        DiagramKind::PlantUml => render_plantuml(body, &out)?,
-        DiagramKind::Mermaid => render_mermaid(body, &out)?,
+        DiagramKind::PlantUml => render_plantuml(body, &cache_path)?,
+        DiagramKind::Mermaid => render_mermaid(body, &cache_path)?,
     }
-    let _ = ext;
-    Ok(out)
+    let bytes = std::fs::read(&cache_path)
+        .with_context(|| format!("read rendered diagram {}", cache_path.display()))?;
+    Ok((mime, bytes))
 }
 
 fn render_plantuml(body: &str, out: &Path) -> Result<()> {
@@ -363,7 +410,7 @@ mod fence_tests {
     fn transform_leaves_non_diagram_code_alone() {
         let src = "# Hi\n\n```rust\nfn main() {}\n```\n\nBye\n";
         let dst = tempfile::tempdir().unwrap();
-        let out = super::transform_markdown(src, dst.path()).unwrap();
+        let out = super::transform_markdown(src, dst.path(), super::TransformPolicy { plantuml: true, mermaid: true }).unwrap();
         assert!(out.contains("```rust"));
         assert!(out.contains("fn main()"));
         assert!(out.contains("Bye"));
@@ -374,7 +421,7 @@ mod fence_tests {
         // If a user has ```mermaid with no closing ``` we shouldn't swallow it.
         let src = "# Title\n\n```mermaid\ngraph TD\nA-->B\n\nno close here\n";
         let dst = tempfile::tempdir().unwrap();
-        let out = super::transform_markdown(src, dst.path()).unwrap();
+        let out = super::transform_markdown(src, dst.path(), super::TransformPolicy { plantuml: true, mermaid: true }).unwrap();
         assert!(out.contains("```mermaid"), "fence should be preserved on unterminated");
         assert!(out.contains("graph TD"));
     }
@@ -384,7 +431,7 @@ mod fence_tests {
         // str::lines() strips both \n and \r\n, so CRLF input round-trips.
         let src = "# Title\r\n\r\n```rust\r\nfn a() {}\r\n```\r\n\r\nEnd.\r\n";
         let dst = tempfile::tempdir().unwrap();
-        let out = super::transform_markdown(src, dst.path()).unwrap();
+        let out = super::transform_markdown(src, dst.path(), super::TransformPolicy { plantuml: true, mermaid: true }).unwrap();
         assert!(out.contains("fn a()"));
         assert!(out.contains("End."));
     }
@@ -394,7 +441,7 @@ mod fence_tests {
         let src =
             "# Doc\n\nParagraph.\n\n```rust\nfn a() {}\n```\n\n| h | h |\n|---|---|\n| a | b |\n\n## Section\n\n- list\n";
         let dst = tempfile::tempdir().unwrap();
-        let out = super::transform_markdown(src, dst.path()).unwrap();
+        let out = super::transform_markdown(src, dst.path(), super::TransformPolicy { plantuml: true, mermaid: true }).unwrap();
         assert!(out.contains("Paragraph."));
         assert!(out.contains("```rust"));
         assert!(out.contains("| a | b |"));
