@@ -4,7 +4,7 @@
 [book]
 title = "{{TITLE}}"
 authors = ["{{AUTHOR}}"]
-language = "ko"
+language = "{{LANGUAGE}}"
 src = "src"
 
 [build]
@@ -22,12 +22,14 @@ smart-punctuation = true
 additional-css = [
     "theme/julian-jee-variables.css",
     "theme/julian-jee-general.css",
+    "theme/mdp-breadcrumb.css",
     "theme/pagetoc.css",
 ]
 additional-js = [
     "mermaid.min.js",
     "mermaid-init.js",
     "theme/pagetoc.js",
+    "theme/mdp-breadcrumb.js",
 ]
 
 [output.html.fold]

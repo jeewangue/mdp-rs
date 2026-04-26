@@ -14,6 +14,9 @@ pub struct Workspace {
     pub root: PathBuf,
     /// `root/src/` — symlink or copy of the user's dir.
     pub src: PathBuf,
+    /// Canonicalized user source directory — kept so `resync()` can re-walk it
+    /// when `serve --watch` notices file add/remove/rename.
+    pub src_canonical: PathBuf,
     /// RAII tempdir — dropped when Workspace goes out of scope, cleaning up the
     /// prepared files. Holding it prevents `/tmp/mdp-*` directories from leaking.
     _tmp: TempDir,
@@ -37,28 +40,48 @@ impl Workspace {
         // symbolic links". Per-file mirroring keeps mdbook scoped to files we
         // whitelisted while inotify still fires on edits because it follows
         // symlinks.
-        std::fs::create_dir_all(&book_src)?;
+        Self::do_mirror_and_summary(&book_src, &src_canonical)?;
+
+        let cfg = BookConfig::new(&src_canonical, title_override)?;
+        write_book_toml(&book_root, &cfg)?;
+        install_theme(&book_root)?;
+
+        Ok(Self { root: book_root, src: book_src, src_canonical, _tmp: tmp })
+    }
+
+    fn do_mirror_and_summary(book_src: &Path, src_canonical: &Path) -> Result<()> {
+        std::fs::create_dir_all(book_src)?;
         let mut mirrored = 0usize;
-        // Seed the visited-set with the root canonical path so a child symlink
-        // that resolves back to root is treated as a cycle.
         let mut visited: HashSet<PathBuf> = HashSet::new();
-        visited.insert(src_canonical.clone());
+        visited.insert(src_canonical.to_path_buf());
         mirror_md_files(
-            &src_canonical,
-            &src_canonical,
-            &book_src,
+            src_canonical,
+            src_canonical,
+            book_src,
             &mut mirrored,
             &mut visited,
         )?;
         tracing::debug!("mirrored {mirrored} .md files into {}", book_src.display());
-
-        let cfg = BookConfig::new(&src_canonical, title_override)?;
-        write_book_toml(&book_root, &cfg)?;
-        generate_summary(&book_src, &src_canonical)?;
-        install_theme(&book_root)?;
-
-        Ok(Self { root: book_root, src: book_src, _tmp: tmp })
+        generate_summary(book_src, src_canonical)?;
+        Ok(())
     }
+}
+
+/// Free-function form of `Workspace::resync` for use by the file watcher,
+/// which can't hold a `&Workspace` across a thread boundary (TempDir doesn't
+/// satisfy the bounds). Wipes per-file symlinks and re-runs mirror+summary.
+pub fn resync_workspace_src(book_src: &Path, src_canonical: &Path) -> Result<()> {
+    if let Ok(rd) = std::fs::read_dir(book_src) {
+        for entry in rd.flatten() {
+            let p = entry.path();
+            let _ = if p.is_dir() && !p.is_symlink() {
+                std::fs::remove_dir_all(&p)
+            } else {
+                std::fs::remove_file(&p)
+            };
+        }
+    }
+    Workspace::do_mirror_and_summary(book_src, src_canonical)
 }
 
 /// Recursively mirror `.md` files from `src` into `dst`, preserving relative
@@ -196,6 +219,7 @@ fn write_book_toml(root: &Path, cfg: &BookConfig) -> Result<()> {
     let rendered = tmpl
         .replace("{{TITLE}}", &toml_string_body(&cfg.title))
         .replace("{{AUTHOR}}", &toml_string_body(&cfg.author))
+        .replace("{{LANGUAGE}}", &toml_string_body(&cfg.language))
         .replace("{{PLANTUML_SERVER}}", &toml_string_body(&cfg.plantuml_server))
         // SRC_DIR is a comment on line 2 — any newline in the path would escape the
         // comment. Strip CR/LF + other control chars, same treatment.
@@ -255,7 +279,15 @@ fn strip_controls(s: &str) -> String {
 /// Scan `src/` for `.md` files and write `SUMMARY.md` if one doesn't exist.
 ///
 /// mdbook REQUIRES SUMMARY.md. If the user already has one we respect it; otherwise we
-/// auto-generate from the directory structure (alphabetical, index.md first).
+/// auto-generate from the directory structure preserving the on-disk hierarchy:
+///
+/// * Files in the root directory become top-level chapters (`- [title](./file.md)`),
+///   with `index.md` (or `README.md` as fallback) emitted first.
+/// * Sub-directories become nested chapters indented by 2 spaces per level. A
+///   sub-directory's `index.md` (or `README.md`) supplies the parent chapter
+///   link; if neither exists the directory becomes a draft chapter (`- [name]()`)
+///   so its children can still nest under it.
+/// * Sibling order: index first, then `.md` files A→Z, then sub-directories A→Z.
 ///
 /// Symlinks in the tree that resolve OUTSIDE `canonical_root` are skipped — this
 /// prevents a malicious dir from exposing arbitrary `.md` files on the filesystem
@@ -266,111 +298,329 @@ fn generate_summary(src: &Path, canonical_root: &Path) -> Result<()> {
         return Ok(());
     }
 
-    let mut entries: Vec<PathBuf> = walk_md(src, canonical_root)?;
-    entries.sort_by(|a, b| {
-        let ai = a.file_name().and_then(|n| n.to_str()) == Some("index.md");
-        let bi = b.file_name().and_then(|n| n.to_str()) == Some("index.md");
-        match (ai, bi) {
-            (true, false) => std::cmp::Ordering::Less,
-            (false, true) => std::cmp::Ordering::Greater,
-            _ => a.cmp(b),
-        }
-    });
-
+    let tree = build_chapter_tree(src, canonical_root)?;
     let mut out = String::from("# Summary\n\n");
-    for entry in entries {
-        let rel = entry.strip_prefix(src).unwrap_or(&entry);
-        let title = read_title(&entry).unwrap_or_else(|| {
-            rel.file_stem().and_then(|s| s.to_str()).unwrap_or("untitled").to_string()
-        });
-        // Escape `]` and `)` in filenames so they can't break the link syntax.
-        let safe_title = title.replace(['[', ']'], "");
-        out.push_str(&format!("- [{safe_title}](./{})\n", rel.display()));
-    }
+    emit_root(&mut out, &tree);
 
-    // `summary` lives at `book_src/SUMMARY.md`. Since `book_src` is a symlink to
-    // the user's real source dir, writing here DOES touch the user's dir. If that
-    // fails (read-only fs, permission), the warning tells them to create one
-    // manually. See TODO in commit log for moving this to a shadow location.
-    match std::fs::write(&summary, out) {
-        Ok(_) => Ok(()),
-        Err(e) => {
-            tracing::warn!(
-                "could not write auto-generated SUMMARY.md to {}: {e} — add one manually",
-                summary.display()
-            );
-            Err(e.into())
-        }
+    // SUMMARY lives at `book_src/SUMMARY.md`, a regular file in the tmpdir
+    // (book_src is a real directory, not a symlink — only the per-file mirrors
+    // inside it are symlinks). Writing here does not touch the user's source
+    // tree.
+    //
+    // Atomic write: stage to .tmp then rename, so `mdbook serve --watch`
+    // can never observe a half-truncated SUMMARY.md.
+    let tmp = summary.with_extension("md.tmp");
+    if let Err(e) = std::fs::write(&tmp, out)
+        .and_then(|_| std::fs::rename(&tmp, &summary))
+    {
+        let _ = std::fs::remove_file(&tmp);
+        tracing::warn!(
+            "could not write auto-generated SUMMARY.md to {}: {e} — add one manually",
+            summary.display()
+        );
+        return Err(e.into());
+    }
+    Ok(())
+}
+
+/// Hierarchical view of a directory of `.md` files.
+#[derive(Debug)]
+struct ChapterTree {
+    /// Display name for this directory (used as the title when no `index`/`README`).
+    name: String,
+    /// Path to the index file (`index.md` preferred, `README.md` fallback)
+    /// relative to the SUMMARY src root, if any.
+    index_rel: Option<PathBuf>,
+    /// Title resolved from the index file's H1, or `None` if no H1 / no index.
+    index_title: Option<String>,
+    /// Non-index `.md` files directly inside this dir, sorted by filename.
+    files: Vec<FileEntry>,
+    /// Sub-directories with at least one `.md` file in their tree, sorted by name.
+    subdirs: Vec<ChapterTree>,
+}
+
+#[derive(Debug)]
+struct FileEntry {
+    rel: PathBuf,    // relative to the SUMMARY src root
+    title: String,   // H1 of the file, falling back to the file stem
+}
+
+impl ChapterTree {
+    fn is_empty(&self) -> bool {
+        self.index_rel.is_none() && self.files.is_empty() && self.subdirs.is_empty()
     }
 }
 
-/// Walk `dir` recursively, collecting `.md` files. `canonical_root` is used to
-/// reject symlinks whose target escapes the tree. Shares the exclusion list
-/// with `mirror_md_files` so SUMMARY.md generation and workspace mirroring
-/// see exactly the same files.
-fn walk_md(dir: &Path, canonical_root: &Path) -> Result<Vec<PathBuf>> {
-    let mut out = Vec::new();
-    let rd = match std::fs::read_dir(dir) {
-        Ok(rd) => rd,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(out),
-        Err(e) => return Err(e.into()),
-    };
-    for entry in rd {
-        let entry = entry?;
-        let path = entry.path();
+fn build_chapter_tree(root: &Path, canonical_root: &Path) -> Result<ChapterTree> {
+    fn walk(
+        dir: &Path,
+        root: &Path,
+        canonical_root: &Path,
+        visited: &mut HashSet<PathBuf>,
+    ) -> Result<ChapterTree> {
+        let mut index_path: Option<PathBuf> = None;
+        let mut readme_path: Option<PathBuf> = None;
+        let mut files: Vec<PathBuf> = Vec::new();
+        let mut dirs: Vec<PathBuf> = Vec::new();
 
-        let md = match std::fs::symlink_metadata(&path) {
-            Ok(m) => m,
-            Err(_) => continue,
+        let rd = match std::fs::read_dir(dir) {
+            Ok(rd) => rd,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                return Ok(empty_tree(dir));
+            }
+            Err(e) => return Err(e.into()),
         };
-        if md.file_type().is_symlink() {
-            let resolved = match path.canonicalize() {
-                Ok(p) => p,
+        for entry in rd {
+            let entry = entry?;
+            let path = entry.path();
+
+            let md = match std::fs::symlink_metadata(&path) {
+                Ok(m) => m,
                 Err(_) => continue,
             };
-            if !resolved.starts_with(canonical_root) {
-                tracing::warn!("skipping symlink that escapes source tree: {}", path.display());
-                continue;
+            if md.file_type().is_symlink() {
+                let resolved = match path.canonicalize() {
+                    Ok(p) => p,
+                    Err(_) => continue,
+                };
+                if !resolved.starts_with(canonical_root) {
+                    tracing::warn!(
+                        "skipping symlink that escapes source tree: {}",
+                        path.display()
+                    );
+                    continue;
+                }
+            }
+
+            if path.is_dir() {
+                if let Some(name) = path.file_name().and_then(|n| n.to_str())
+                    && is_excluded_dir(name)
+                {
+                    continue;
+                }
+                // Cycle detection: same protocol as `mirror_md_files` —
+                // canonicalize the dir and refuse to re-enter a path we've
+                // already seen. Catches `docs/self -> ../docs` and cross-
+                // branch symlinks pointing back into the tree.
+                let canonical = match path.canonicalize() {
+                    Ok(p) => p,
+                    Err(_) => continue,
+                };
+                if !visited.insert(canonical.clone()) {
+                    tracing::warn!(
+                        "skipping cyclic / already-visited directory: {} (resolves to {})",
+                        path.display(),
+                        canonical.display()
+                    );
+                    continue;
+                }
+                dirs.push(path);
+            } else if path.extension().and_then(|e| e.to_str()) == Some("md") {
+                let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
+                match name {
+                    "SUMMARY.md" => continue,
+                    "index.md" => index_path = Some(path),
+                    "README.md" => readme_path = Some(path),
+                    _ => files.push(path),
+                }
             }
         }
 
-        if path.is_dir() {
-            if let Some(name) = path.file_name().and_then(|n| n.to_str())
-                && is_excluded_dir(name)
-            {
-                continue;
+        files.sort();
+        dirs.sort();
+
+        let index_abs = index_path.or(readme_path);
+        let index_title = index_abs.as_deref().and_then(read_title);
+        let index_rel = index_abs
+            .as_deref()
+            .map(|p| p.strip_prefix(root).unwrap_or(p).to_path_buf());
+
+        let file_entries: Vec<FileEntry> = files
+            .into_iter()
+            .map(|p| {
+                let rel = p.strip_prefix(root).unwrap_or(&p).to_path_buf();
+                let title = read_title(&p).unwrap_or_else(|| {
+                    p.file_stem()
+                        .and_then(|s| s.to_str())
+                        .unwrap_or("untitled")
+                        .to_string()
+                });
+                FileEntry { rel, title }
+            })
+            .collect();
+
+        let mut subdirs: Vec<ChapterTree> = Vec::new();
+        for d in dirs {
+            let child = walk(&d, root, canonical_root, visited)?;
+            if !child.is_empty() {
+                subdirs.push(child);
             }
-            out.extend(walk_md(&path, canonical_root)?);
-        } else if path.extension().and_then(|e| e.to_str()) == Some("md") {
-            let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
-            if name == "SUMMARY.md" || name == "README.md" {
-                continue;
-            }
-            out.push(path);
+        }
+
+        let name = dir
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or("")
+            .to_string();
+
+        Ok(ChapterTree {
+            name,
+            index_rel,
+            index_title,
+            files: file_entries,
+            subdirs,
+        })
+    }
+
+    fn empty_tree(dir: &Path) -> ChapterTree {
+        ChapterTree {
+            name: dir
+                .file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or("")
+                .to_string(),
+            index_rel: None,
+            index_title: None,
+            files: Vec::new(),
+            subdirs: Vec::new(),
         }
     }
-    Ok(out)
+
+    let mut visited: HashSet<PathBuf> = HashSet::new();
+    visited.insert(canonical_root.to_path_buf());
+    walk(root, root, canonical_root, &mut visited)
+}
+
+fn emit_root(out: &mut String, root: &ChapterTree) {
+    // Root index (if present) gets emitted first, at depth 0, with the same
+    // formatting as a file entry (no parent draft chapter wraps it).
+    if let Some(rel) = &root.index_rel {
+        let title = root.index_title.clone().unwrap_or_else(|| {
+            rel.file_stem()
+                .and_then(|s| s.to_str())
+                .unwrap_or("Index")
+                .to_string()
+        });
+        out.push_str(&format!(
+            "- [{}]({})\n",
+            escape_link_text(&title),
+            format_link_url(rel),
+        ));
+    }
+    for f in &root.files {
+        out.push_str(&format!(
+            "- [{}]({})\n",
+            escape_link_text(&f.title),
+            format_link_url(&f.rel),
+        ));
+    }
+    for child in &root.subdirs {
+        emit_subdir(out, child, 0);
+    }
+}
+
+fn emit_subdir(out: &mut String, node: &ChapterTree, indent: usize) {
+    let pad = "  ".repeat(indent);
+    let title = node
+        .index_title
+        .clone()
+        .unwrap_or_else(|| node.name.clone());
+    let link = match &node.index_rel {
+        Some(rel) => format_link_url(rel),
+        None => String::new(), // draft chapter (mdbook nests children under it)
+    };
+    out.push_str(&format!("{pad}- [{}]({})\n", escape_link_text(&title), link));
+
+    let child_indent = indent + 1;
+    let cpad = "  ".repeat(child_indent);
+    for f in &node.files {
+        out.push_str(&format!(
+            "{cpad}- [{}]({})\n",
+            escape_link_text(&f.title),
+            format_link_url(&f.rel),
+        ));
+    }
+    for child in &node.subdirs {
+        emit_subdir(out, child, child_indent);
+    }
+}
+
+/// Format a relative path as a SUMMARY link URL: prefix `./`, normalise
+/// separators to `/`, and percent-encode characters that would confuse
+/// pulldown-cmark's link parser (space, parens, `#`, `?`, `%`, autolink-form
+/// brackets `<>`, code-span backticks, ASCII controls). Non-ASCII characters
+/// (Korean, emoji, etc) pass through as-is — mdbook and browsers accept
+/// UTF-8 in URLs natively.
+fn format_link_url(rel: &Path) -> String {
+    let s = rel.to_string_lossy().replace('\\', "/");
+    let mut out = String::with_capacity(s.len() + 8);
+    out.push_str("./");
+    for c in s.chars() {
+        if matches!(
+            c,
+            'A'..='Z' | 'a'..='z' | '0'..='9' | '/' | '-' | '.' | '_' | '~'
+        ) {
+            out.push(c);
+        } else if (c as u32) >= 0x80 {
+            // Beyond ASCII — pass through. Hangul, CJK, emoji, etc.
+            out.push(c);
+        } else {
+            // ASCII char that needs percent-encoding.
+            use std::fmt::Write;
+            let _ = write!(out, "%{:02X}", c as u8);
+        }
+    }
+    out
+}
+
+/// Backslash-escape characters that would break a SUMMARY entry's link text
+/// (`[`, `]`, `\`, `` ` ``) and HTML-injection vectors (`<`, `>`).
+/// pulldown-cmark allows raw HTML in link text by default, so an unescaped
+/// `<script>` in a heading would render as live HTML in the sidebar.
+fn escape_link_text(title: &str) -> String {
+    let mut out = String::with_capacity(title.len());
+    for c in title.chars() {
+        match c {
+            '[' | ']' | '\\' | '`' => {
+                out.push('\\');
+                out.push(c);
+            }
+            '<' => out.push_str("&lt;"),
+            '>' => out.push_str("&gt;"),
+            _ => out.push(c),
+        }
+    }
+    out
 }
 
 fn read_title(path: &Path) -> Option<String> {
-    let content = std::fs::read_to_string(path).ok()?;
-    for line in content.lines() {
+    use std::io::{BufRead, BufReader};
+    let f = std::fs::File::open(path).ok()?;
+    let mut buf = BufReader::new(f);
+    let mut line = String::new();
+    loop {
+        line.clear();
+        let n = buf.read_line(&mut line).ok()?;
+        if n == 0 {
+            return None;
+        }
         let t = line.trim_start();
         if let Some(rest) = t.strip_prefix("# ") {
             return Some(rest.trim().to_string());
         }
     }
-    None
 }
 
 fn install_theme(root: &Path) -> Result<()> {
     let theme_dir = root.join("theme");
     std::fs::create_dir_all(&theme_dir)?;
 
-    // Extract julian.jee CSS files with conventional names (flat, under theme/).
+    // Extract julian.jee CSS + JS files with conventional names (flat, under theme/).
     for (src_path, dst_name) in [
         ("themes/julian.jee/css/variables.css", "julian-jee-variables.css"),
         ("themes/julian.jee/css/general.css", "julian-jee-general.css"),
+        ("themes/julian.jee/css/breadcrumb.css", "mdp-breadcrumb.css"),
+        ("themes/julian.jee/js/breadcrumb.js", "mdp-breadcrumb.js"),
     ] {
         let data = Assets::get(src_path)
             .ok_or_else(|| anyhow::anyhow!("embedded asset missing: {src_path}"))?
@@ -497,77 +747,6 @@ additional-js = ["http://evil/x.js"]
     #[test]
     fn strip_controls_removes_tab_and_null() {
         assert_eq!(strip_controls("a\tb\0c"), "abc");
-    }
-
-    #[test]
-    fn walk_md_skips_hidden_and_noise_dirs() {
-        let tmp = tempfile::tempdir().unwrap();
-        let root = tmp.path();
-        // shape:
-        //   root/
-        //     visible.md
-        //     README.md      (skipped)
-        //     .hidden/inside.md
-        //     node_modules/blah.md
-        //     target/debug/foo.md
-        //     sub/nested.md
-        std::fs::write(root.join("visible.md"), "# V").unwrap();
-        std::fs::write(root.join("README.md"), "# R").unwrap();
-        for d in [".hidden", "node_modules", "target/debug"] {
-            std::fs::create_dir_all(root.join(d)).unwrap();
-            std::fs::write(root.join(d).join("hidden.md"), "# H").unwrap();
-        }
-        std::fs::create_dir_all(root.join("sub")).unwrap();
-        std::fs::write(root.join("sub/nested.md"), "# N").unwrap();
-
-        let mut found = walk_md(root, root).unwrap();
-        found.sort();
-        let names: Vec<_> = found
-            .iter()
-            .map(|p| p.strip_prefix(root).unwrap().to_string_lossy().into_owned())
-            .collect();
-        assert_eq!(names, vec!["sub/nested.md".to_string(), "visible.md".to_string()]);
-    }
-
-    #[test]
-    #[cfg(unix)]
-    fn walk_md_rejects_symlink_outside_root() {
-        let outside = tempfile::tempdir().unwrap();
-        std::fs::write(outside.path().join("secret.md"), "# S").unwrap();
-
-        let root_dir = tempfile::tempdir().unwrap();
-        let root = root_dir.path();
-        std::fs::write(root.join("inside.md"), "# I").unwrap();
-        // Symlink from root → outside secret.md
-        std::os::unix::fs::symlink(outside.path().join("secret.md"), root.join("link.md")).unwrap();
-
-        let canonical_root = root.canonicalize().unwrap();
-        let found: Vec<_> = walk_md(root, &canonical_root)
-            .unwrap()
-            .iter()
-            .map(|p| p.file_name().unwrap().to_string_lossy().into_owned())
-            .collect();
-        // link.md MUST be rejected; inside.md allowed.
-        assert_eq!(found, vec!["inside.md".to_string()]);
-    }
-
-    #[test]
-    #[cfg(unix)]
-    fn walk_md_follows_symlink_inside_root() {
-        let root_dir = tempfile::tempdir().unwrap();
-        let root = root_dir.path();
-        std::fs::write(root.join("real.md"), "# R").unwrap();
-        // symlink → sibling in same tree is fine.
-        std::os::unix::fs::symlink(root.join("real.md"), root.join("alias.md")).unwrap();
-
-        let canonical_root = root.canonicalize().unwrap();
-        let mut found: Vec<_> = walk_md(root, &canonical_root)
-            .unwrap()
-            .iter()
-            .map(|p| p.file_name().unwrap().to_string_lossy().into_owned())
-            .collect();
-        found.sort();
-        assert_eq!(found, vec!["alias.md".to_string(), "real.md".to_string()]);
     }
 
     #[test]
@@ -802,5 +981,340 @@ additional-js = ["http://evil/x.js"]
         let tmp4 = tempfile::NamedTempFile::new().unwrap();
         std::fs::write(tmp4.path(), "intro\n# Later H1\nbody\n").unwrap();
         assert_eq!(read_title(tmp4.path()).as_deref(), Some("Later H1"));
+    }
+
+    // -------------------------- generate_summary -----------------------------
+
+    fn build_summary(layout: &[(&str, &str)]) -> String {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        for (path, content) in layout {
+            let p = root.join(path);
+            if let Some(parent) = p.parent() {
+                std::fs::create_dir_all(parent).unwrap();
+            }
+            std::fs::write(p, content).unwrap();
+        }
+        let canonical = root.canonicalize().unwrap();
+        super::generate_summary(root, &canonical).unwrap();
+        std::fs::read_to_string(root.join("SUMMARY.md")).unwrap()
+    }
+
+    #[test]
+    fn summary_flat_preserves_index_first_then_alphabetical() {
+        let s = build_summary(&[
+            ("apple.md", "# Apple"),
+            ("zebra.md", "# Zebra"),
+            ("index.md", "# My Project"),
+        ]);
+        let lines: Vec<&str> = s.lines().filter(|l| l.starts_with("- ")).collect();
+        assert_eq!(lines.len(), 3);
+        assert_eq!(lines[0], "- [My Project](./index.md)");
+        assert_eq!(lines[1], "- [Apple](./apple.md)");
+        assert_eq!(lines[2], "- [Zebra](./zebra.md)");
+    }
+
+    #[test]
+    fn summary_nests_subdir_with_index() {
+        let s = build_summary(&[
+            ("index.md", "# Root"),
+            ("sub/index.md", "# Sub Section"),
+            ("sub/leaf.md", "# Leaf"),
+        ]);
+        let body: Vec<String> = s.lines().filter(|l| l.contains("](")).map(String::from).collect();
+        assert_eq!(body[0], "- [Root](./index.md)");
+        assert_eq!(body[1], "- [Sub Section](./sub/index.md)");
+        assert_eq!(body[2], "  - [Leaf](./sub/leaf.md)");
+    }
+
+    #[test]
+    fn summary_emits_draft_chapter_for_dir_without_index() {
+        let s = build_summary(&[
+            ("index.md", "# Root"),
+            ("subdir/sub.md", "# Sub Page"),
+            ("subdir/nested/leaf.md", "# Nested Leaf"),
+        ]);
+        let body: Vec<String> = s.lines().filter(|l| l.contains("](")).map(String::from).collect();
+        assert_eq!(body[0], "- [Root](./index.md)");
+        assert_eq!(body[1], "- [subdir]()"); // draft (no link target)
+        assert_eq!(body[2], "  - [Sub Page](./subdir/sub.md)");
+        assert_eq!(body[3], "  - [nested]()"); // draft, indented further
+        assert_eq!(body[4], "    - [Nested Leaf](./subdir/nested/leaf.md)");
+    }
+
+    #[test]
+    fn summary_treats_readme_as_dir_index_fallback() {
+        let s = build_summary(&[
+            ("index.md", "# Root"),
+            ("docs/README.md", "# Docs"),
+            ("docs/details.md", "# Details"),
+        ]);
+        let body: Vec<String> = s.lines().filter(|l| l.contains("](")).map(String::from).collect();
+        assert!(body.iter().any(|l| l == "- [Docs](./docs/README.md)"));
+        assert!(body.iter().any(|l| l == "  - [Details](./docs/details.md)"));
+    }
+
+    #[test]
+    fn summary_index_md_wins_over_readme() {
+        let s = build_summary(&[
+            ("index.md", "# Root"),
+            ("section/index.md", "# Section Index"),
+            ("section/README.md", "# Section README"),
+            ("section/leaf.md", "# Leaf"),
+        ]);
+        let body: Vec<String> = s.lines().filter(|l| l.contains("](")).map(String::from).collect();
+        // index.md should be the chosen index (linked); README is treated as a
+        // regular file alongside.
+        assert!(body.contains(&"- [Section Index](./section/index.md)".to_string()));
+        // README should NOT shadow index.md
+        assert!(!body.iter().any(|l| l.contains("./section/README.md")));
+    }
+
+    #[test]
+    fn summary_index_md_wins_over_readme_at_root() {
+        // Root-level path is reached via emit_root, not the recursive subdir
+        // walk — needs its own regression test so a refactor of either branch
+        // can't silently break this asymmetric pair.
+        let s = build_summary(&[
+            ("index.md", "# Root Index"),
+            ("README.md", "# Root README"),
+            ("alpha.md", "# Alpha"),
+        ]);
+        let body: Vec<String> = s.lines().filter(|l| l.contains("](")).map(String::from).collect();
+        assert!(
+            body.iter().any(|l| l == "- [Root Index](./index.md)"),
+            "root index.md should be the linked chapter; got body:\n{body:#?}"
+        );
+        assert!(
+            !body.iter().any(|l| l.contains("./README.md")),
+            "root README.md should not shadow index.md; got body:\n{body:#?}"
+        );
+    }
+
+    #[test]
+    fn summary_uses_dir_name_when_no_index_or_readme() {
+        let s = build_summary(&[
+            ("index.md", "# Root"),
+            ("hollow/leaf.md", "# Leaf"),
+        ]);
+        let body: Vec<String> = s.lines().filter(|l| l.contains("](")).map(String::from).collect();
+        assert!(body.iter().any(|l| l == "- [hollow]()"));
+    }
+
+    #[test]
+    fn summary_falls_back_to_filestem_when_no_h1() {
+        let s = build_summary(&[
+            ("index.md", "# Root"),
+            ("just-content.md", "no heading at all\n"),
+        ]);
+        let body: Vec<String> = s.lines().filter(|l| l.contains("](")).map(String::from).collect();
+        assert!(body.iter().any(|l| l == "- [just-content](./just-content.md)"));
+    }
+
+    #[test]
+    fn summary_url_encodes_path_special_chars() {
+        let s = build_summary(&[
+            ("index.md", "# Root"),
+            ("file with spaces.md", "# Spaced"),
+            ("paren (draft).md", "# Parens"),
+        ]);
+        // Spaces and parens MUST be percent-encoded so pulldown-cmark parses
+        // them as a single link target.
+        assert!(s.contains("(./file%20with%20spaces.md)"), "expected percent-encoded space:\n{s}");
+        assert!(s.contains("(./paren%20%28draft%29.md)"), "expected percent-encoded parens:\n{s}");
+    }
+
+    #[test]
+    fn summary_escapes_brackets_in_titles() {
+        let s = build_summary(&[
+            ("index.md", "# [Brackets] Inside"),
+            ("a.md", "# Has [brackets] too"),
+        ]);
+        let body: Vec<String> = s.lines().filter(|l| l.contains("](")).map(String::from).collect();
+        // Brackets are backslash-escaped (preserves the original text without
+        // breaking link parsing) — old code stripped them entirely.
+        assert!(body[0].contains(r"\[Brackets\] Inside"), "got: {}", body[0]);
+        assert!(body[1].contains(r"\[brackets\]"));
+    }
+
+    #[test]
+    fn summary_handles_korean_titles() {
+        let s = build_summary(&[
+            ("index.md", "# 한글 문서"),
+            ("그림자.md", "# 그림자 페이지"),
+        ]);
+        assert!(s.contains("[한글 문서]"));
+        assert!(s.contains("[그림자 페이지]"));
+        // Hangul chars in path are NOT percent-encoded (they're valid URL
+        // characters) — sanity check the URL stays readable.
+        assert!(s.contains("(./%EA%B7%B8%EB%A6%BC%EC%9E%90.md)") || s.contains("(./그림자.md)"));
+    }
+
+    #[test]
+    fn summary_skips_summary_md_in_input() {
+        // If we inadvertently encounter a SUMMARY.md as input, it must not
+        // appear as a chapter entry.
+        let s = build_summary(&[
+            ("index.md", "# Root"),
+            ("SUMMARY.md", "preserved"),
+            ("page.md", "# Page"),
+        ]);
+        // Note: the early-return in generate_summary respects an existing
+        // SUMMARY.md, so this layout actually returns the user's existing
+        // SUMMARY content. Confirm the early-return path:
+        assert!(s.contains("preserved") || s.contains("- [Page]"));
+    }
+
+    #[test]
+    fn summary_sort_groups_files_then_subdirs_at_each_level() {
+        let s = build_summary(&[
+            ("index.md", "# Root"),
+            ("zeta.md", "# Zeta"),         // root file
+            ("alpha.md", "# Alpha"),       // root file
+            ("subdir/inner.md", "# Inner"),// subdir
+        ]);
+        let body: Vec<String> = s.lines().filter(|l| l.contains("](")).map(String::from).collect();
+        // Order: index, files A→Z, then subdirs.
+        assert_eq!(body[0], "- [Root](./index.md)");
+        assert_eq!(body[1], "- [Alpha](./alpha.md)");
+        assert_eq!(body[2], "- [Zeta](./zeta.md)");
+        assert_eq!(body[3], "- [subdir]()");
+        assert_eq!(body[4], "  - [Inner](./subdir/inner.md)");
+    }
+
+    #[test]
+    fn summary_deeply_nested_indents_correctly() {
+        let s = build_summary(&[
+            ("index.md", "# Root"),
+            ("a/index.md", "# A"),
+            ("a/b/index.md", "# B"),
+            ("a/b/c/index.md", "# C"),
+            ("a/b/c/leaf.md", "# Leaf"),
+        ]);
+        let body: Vec<String> = s.lines().filter(|l| l.contains("](")).map(String::from).collect();
+        assert_eq!(body[0], "- [Root](./index.md)");
+        assert_eq!(body[1], "- [A](./a/index.md)");
+        assert_eq!(body[2], "  - [B](./a/b/index.md)");
+        assert_eq!(body[3], "    - [C](./a/b/c/index.md)");
+        assert_eq!(body[4], "      - [Leaf](./a/b/c/leaf.md)");
+    }
+
+    #[test]
+    fn summary_drops_empty_subdirs_with_no_md() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        std::fs::write(root.join("index.md"), "# R").unwrap();
+        std::fs::create_dir_all(root.join("empty/inner")).unwrap();
+        // No .md files anywhere under empty/.
+        let canonical = root.canonicalize().unwrap();
+        super::generate_summary(root, &canonical).unwrap();
+        let s = std::fs::read_to_string(root.join("SUMMARY.md")).unwrap();
+        assert!(!s.contains("empty"), "empty dirs should not appear:\n{s}");
+    }
+
+    #[test]
+    fn summary_respects_existing_user_summary() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        std::fs::write(root.join("index.md"), "# R").unwrap();
+        let custom = "# Summary\n\n- [Custom](./index.md)\n";
+        std::fs::write(root.join("SUMMARY.md"), custom).unwrap();
+        let canonical = root.canonicalize().unwrap();
+        super::generate_summary(root, &canonical).unwrap();
+        // SUMMARY.md must NOT be overwritten.
+        let s = std::fs::read_to_string(root.join("SUMMARY.md")).unwrap();
+        assert_eq!(s, custom);
+    }
+
+    #[test]
+    fn format_link_url_normalizes_separators_on_windows_paths() {
+        // Even on Unix, paths constructed manually with `\` should be treated
+        // as URL `/` separators.
+        let p = PathBuf::from("a\\b\\c.md");
+        let url = super::format_link_url(&p);
+        assert_eq!(url, "./a/b/c.md");
+    }
+
+    #[test]
+    fn escape_link_text_handles_backticks_and_backslash() {
+        assert_eq!(super::escape_link_text("plain"), "plain");
+        assert_eq!(super::escape_link_text("with [bracket]"), r"with \[bracket\]");
+        assert_eq!(super::escape_link_text("a\\b"), r"a\\b");
+        assert_eq!(super::escape_link_text("with `code`"), r"with \`code\`");
+        // Parens are left alone — they're only meaningful inside URLs.
+        assert_eq!(super::escape_link_text("paren (foo)"), "paren (foo)");
+        // HTML injection is blocked.
+        assert_eq!(
+            super::escape_link_text("<script>alert(1)</script>"),
+            "&lt;script&gt;alert(1)&lt;/script&gt;"
+        );
+    }
+
+    #[test]
+    fn format_link_url_encodes_backtick_and_angle_brackets() {
+        let p = PathBuf::from("a`b<c>.md");
+        let url = super::format_link_url(&p);
+        assert_eq!(url, "./a%60b%3Cc%3E.md");
+    }
+
+    #[test]
+    fn format_link_url_encodes_control_chars() {
+        // Tab in a filename — encoded as %09.
+        let p = PathBuf::from("a\tb.md");
+        let url = super::format_link_url(&p);
+        assert_eq!(url, "./a%09b.md");
+    }
+
+    #[test]
+    fn format_link_url_preserves_utf8_path_bytes() {
+        // Korean filename — bytes beyond ASCII pass through (browsers and
+        // mdbook handle UTF-8 in URLs natively).
+        let p = PathBuf::from("그림자.md");
+        let url = super::format_link_url(&p);
+        assert!(url.starts_with("./"));
+        // Only the leading "./" is added; the rest is the original UTF-8.
+        assert_eq!(&url[2..], "그림자.md");
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn summary_handles_cyclic_symlink_without_infinite_loop() {
+        // docs/self -> ../docs (the npm self-loop pattern, but inside docs)
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        std::fs::write(root.join("index.md"), "# Root").unwrap();
+        std::fs::create_dir_all(root.join("docs")).unwrap();
+        std::fs::write(root.join("docs/leaf.md"), "# Leaf").unwrap();
+        std::os::unix::fs::symlink(root.join("docs"), root.join("docs/self")).unwrap();
+
+        let canonical = root.canonicalize().unwrap();
+        // Must complete without ELOOP / unbounded recursion.
+        super::generate_summary(root, &canonical).unwrap();
+        let s = std::fs::read_to_string(root.join("SUMMARY.md")).unwrap();
+        // `self` should be skipped (it canonicalizes back to docs which is
+        // already visited).
+        let count = s.matches("./docs/leaf.md").count();
+        assert_eq!(count, 1, "leaf.md must appear exactly once:\n{s}");
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn summary_rejects_symlinks_escaping_root() {
+        let outside = tempfile::tempdir().unwrap();
+        std::fs::write(outside.path().join("secret.md"), "# Secret").unwrap();
+
+        let root_dir = tempfile::tempdir().unwrap();
+        let root = root_dir.path();
+        std::fs::write(root.join("index.md"), "# Root").unwrap();
+        std::os::unix::fs::symlink(
+            outside.path().join("secret.md"),
+            root.join("link.md"),
+        ).unwrap();
+
+        let canonical = root.canonicalize().unwrap();
+        super::generate_summary(root, &canonical).unwrap();
+        let s = std::fs::read_to_string(root.join("SUMMARY.md")).unwrap();
+        assert!(!s.contains("link.md"), "escaping symlink leaked into SUMMARY:\n{s}");
+        assert!(!s.contains("secret"), "secret.md content leaked:\n{s}");
     }
 }

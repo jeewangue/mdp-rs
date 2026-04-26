@@ -1,9 +1,12 @@
 use anyhow::{Context, Result};
 use std::net::{IpAddr, SocketAddr, TcpListener};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
+use std::time::Duration;
 
-use crate::preset::Workspace;
+use crate::preset::{Workspace, resync_workspace_src};
 
 /// How many sequential ports to try after the requested one before giving up.
 /// 16 covers "every nvim window in a typical session" with room to spare.
@@ -135,7 +138,14 @@ pub fn run(
     })
     .context("failed to install SIGINT/SIGTERM handler")?;
 
+    // Spawn a debounced filesystem watcher on the user's source directory. On
+    // .md add/remove/rename, re-mirror + regenerate SUMMARY so mdbook --watch
+    // picks up the change. Modifications to existing files are handled by
+    // mdbook's own watcher (the symlinks point straight at the originals).
+    let watch_handle = spawn_summary_watcher(workspace.src_canonical.clone(), &workspace);
+
     let status = child.wait().context("mdbook serve was not running")?;
+    drop(watch_handle); // stop the watcher before tmpdir cleanup
     drop(workspace); // explicit: triggers TempDir cleanup
     if !status.success() {
         // On SIGTERM mdbook exits non-zero by convention — don't treat that as error.
@@ -175,20 +185,96 @@ fn strip_preprocessor_blocks(toml: &str, names: &[&str]) -> String {
     out
 }
 
+const MDBOOK_TOOLS: &[&str] = &[
+    "mdbook",
+    "mdbook-katex",
+    "mdbook-mermaid",
+    "mdbook-plantuml",
+    "mdbook-pagetoc",
+];
+
 fn ensure_deps() -> Result<()> {
-    let required = ["mdbook", "mdbook-katex", "mdbook-mermaid", "mdbook-plantuml", "mdbook-pagetoc"];
-    let missing: Vec<&str> = required
-        .iter()
-        .filter(|bin| which::which(bin).is_err())
-        .copied()
-        .collect();
-    if !missing.is_empty() {
-        anyhow::bail!(
-            "missing required tools: {}. run `mdp install-deps`",
-            missing.join(", ")
-        );
+    super::ensure_tools(MDBOOK_TOOLS)
+}
+
+/// Handle returned by `spawn_summary_watcher`. Drop to stop the watcher.
+struct WatcherHandle {
+    stop: Arc<AtomicBool>,
+    // Hold the debouncer so notify keeps watching for the watcher's lifetime.
+    // notify_debouncer_mini::Debouncer drops cleanly on Drop.
+    _debouncer: Option<Box<dyn std::any::Any + Send>>,
+}
+
+impl Drop for WatcherHandle {
+    fn drop(&mut self) {
+        self.stop.store(true, Ordering::SeqCst);
     }
-    Ok(())
+}
+
+/// Watch `src_canonical` for file system events; on .md add/remove/rename
+/// (NOT modify — mdbook --watch handles content edits via the symlinks),
+/// re-mirror + regenerate SUMMARY.md so newly-added pages appear in the
+/// sidebar without restarting `mdp serve`.
+fn spawn_summary_watcher(src_canonical: PathBuf, ws: &Workspace) -> WatcherHandle {
+    use notify_debouncer_mini::{notify::RecursiveMode, new_debouncer, DebouncedEvent};
+
+    let book_src = ws.src.clone();
+    let stop = Arc::new(AtomicBool::new(false));
+    let stop_for_cb = stop.clone();
+    let book_src_for_cb = book_src.clone();
+    let src_for_cb = src_canonical.clone();
+
+    let debouncer = new_debouncer(
+        Duration::from_millis(500),
+        move |res: Result<Vec<DebouncedEvent>, _>| {
+            if stop_for_cb.load(Ordering::SeqCst) {
+                return;
+            }
+            let events = match res {
+                Ok(ev) => ev,
+                Err(e) => {
+                    tracing::warn!("watch error: {e}");
+                    return;
+                }
+            };
+            // Only resync when at least one .md file changed. Reduces churn
+            // when the user saves something else under the source dir.
+            let needs_resync = events
+                .iter()
+                .any(|e| is_md_file(&e.path) && !is_inside(&e.path, &book_src_for_cb));
+            if !needs_resync {
+                return;
+            }
+            tracing::info!("source changed — resyncing SUMMARY");
+            if let Err(e) = resync_workspace_src(&book_src_for_cb, &src_for_cb) {
+                tracing::warn!("resync failed: {e}");
+            }
+        },
+    );
+
+    let mut debouncer = match debouncer {
+        Ok(d) => d,
+        Err(e) => {
+            tracing::warn!("file watcher unavailable: {e}; live SUMMARY regen disabled");
+            return WatcherHandle { stop, _debouncer: None };
+        }
+    };
+
+    if let Err(e) = debouncer.watcher().watch(&src_canonical, RecursiveMode::Recursive) {
+        tracing::warn!("failed to watch {}: {e}", src_canonical.display());
+        return WatcherHandle { stop, _debouncer: None };
+    }
+
+    tracing::debug!("watching {} for SUMMARY regen", src_canonical.display());
+    WatcherHandle { stop, _debouncer: Some(Box::new(debouncer)) }
+}
+
+fn is_md_file(p: &Path) -> bool {
+    p.extension().and_then(|s| s.to_str()).is_some_and(|e| e.eq_ignore_ascii_case("md"))
+}
+
+fn is_inside(p: &Path, root: &Path) -> bool {
+    p.starts_with(root)
 }
 
 fn run_cmd(cmd: &mut Command, label: &str) -> Result<()> {

@@ -8,6 +8,7 @@ pub struct BookConfig {
     pub author: String,
     pub plantuml_server: String,
     pub src_dir_display: String,
+    pub language: String,
 }
 
 impl BookConfig {
@@ -30,10 +31,50 @@ impl BookConfig {
             .unwrap_or_else(|_| "https://www.plantuml.com/plantuml".into());
         let plantuml_server = validate_plantuml_server(&plantuml_raw)?;
 
+        let language = resolve_language()?;
+
         let src_dir_display = src_dir.display().to_string();
 
-        Ok(Self { title, author, plantuml_server, src_dir_display })
+        Ok(Self { title, author, plantuml_server, src_dir_display, language })
     }
+}
+
+/// Resolve the BCP-47-ish book language. Priority:
+///   1. `MDP_BOOK_LANG` (explicit, anything passing the validator)
+///   2. `LANG` / `LC_ALL` env first segment (`ko_KR.UTF-8` → `ko`)
+///   3. fallback to `"en"` — mdbook search-index needs a real value.
+fn resolve_language() -> Result<String> {
+    if let Ok(v) = std::env::var("MDP_BOOK_LANG") {
+        return validate_language(&v);
+    }
+    let from_locale = std::env::var("LC_ALL")
+        .or_else(|_| std::env::var("LANG"))
+        .ok()
+        .and_then(|v| {
+            let head = v.split(['_', '.', '@']).next().unwrap_or("");
+            (!head.is_empty() && !head.eq_ignore_ascii_case("c") && !head.eq_ignore_ascii_case("posix"))
+                .then(|| head.to_lowercase())
+        });
+    Ok(from_locale.unwrap_or_else(|| "en".to_string()))
+}
+
+/// Validator: `[A-Za-z]{2,3}` (optionally `-region`). mdbook embeds `language`
+/// directly in the rendered HTML `<html lang>`; rejecting anything fancy keeps
+/// us safe from injection while still accepting all real-world tags.
+fn validate_language(raw: &str) -> Result<String> {
+    let s = raw.trim();
+    if s.is_empty() || s.len() > 12 {
+        anyhow::bail!("$MDP_BOOK_LANG must be 1..12 chars, got {raw:?}");
+    }
+    if !s
+        .bytes()
+        .all(|b| b.is_ascii_alphabetic() || b.is_ascii_digit() || b == b'-' || b == b'_')
+    {
+        anyhow::bail!(
+            "$MDP_BOOK_LANG must be ASCII alpha/digit/-/_ (BCP-47-ish), got {raw:?}"
+        );
+    }
+    Ok(s.to_lowercase())
 }
 
 fn whoami() -> Option<String> {
@@ -137,5 +178,24 @@ mod tests {
     fn plantuml_rejects_empty_and_unicode_only() {
         assert!(validate_plantuml_server("").is_err());
         assert!(validate_plantuml_server("한글://server").is_err());
+    }
+
+    #[test]
+    fn validate_language_accepts_common_codes() {
+        assert_eq!(validate_language("en").unwrap(), "en");
+        assert_eq!(validate_language("EN").unwrap(), "en");
+        assert_eq!(validate_language("ko").unwrap(), "ko");
+        assert_eq!(validate_language("en-US").unwrap(), "en-us");
+        assert_eq!(validate_language("zh_CN").unwrap(), "zh_cn");
+    }
+
+    #[test]
+    fn validate_language_rejects_garbage() {
+        assert!(validate_language("").is_err());
+        assert!(validate_language(" ").is_err());
+        assert!(validate_language("한글").is_err());
+        assert!(validate_language("en;evil").is_err());
+        assert!(validate_language("en\";injection=x").is_err());
+        assert!(validate_language(&"a".repeat(20)).is_err());
     }
 }

@@ -152,10 +152,15 @@ fn transform_markdown(src: &str, cache_dir: &Path, policy: TransformPolicy) -> R
                     body.push('\n');
                 }
                 if !closed {
-                    // unterminated fence — emit as-is so pandoc can complain
+                    // Unterminated fence: emit opener + body + a synthetic
+                    // closing ``` so the un-closed block doesn't swallow the
+                    // rest of the document into a single fence. mdbook/pandoc
+                    // still error on the malformed source, but the error is
+                    // local to this block instead of cascading.
                     out.push_str(line);
                     out.push('\n');
                     out.push_str(&body);
+                    out.push_str("```\n");
                     continue;
                 }
 

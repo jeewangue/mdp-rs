@@ -1,0 +1,93 @@
+/* mdp breadcrumb — appears at the top of every content page (when there's
+   ≥2 crumbs to show), lists the chapter chain back to the root index.
+   Pure ASCII separator (›) so it renders consistently across platforms
+   without depending on icon fonts. */
+
+.mdp-breadcrumb {
+    margin: 0 0 1.2em 0;
+    padding: 0.5em 0;
+    font-size: 0.9em;
+    border-bottom: 1px solid var(--quote-border, rgba(127, 127, 127, 0.25));
+    color: var(--fg, inherit);
+}
+
+.mdp-breadcrumb-list {
+    display: flex;
+    align-items: center;
+    flex-wrap: wrap;
+    list-style: none;
+    margin: 0;
+    padding: 0;
+    gap: 0;
+}
+
+/* Each crumb-item bundles its label + trailing separator so wrapping never
+   orphans a `›` at the start of a new line. */
+.mdp-breadcrumb-item {
+    display: inline-flex;
+    align-items: center;
+    white-space: nowrap;
+    gap: 0.35em;
+    margin-right: 0.35em;
+}
+
+.mdp-breadcrumb-item:last-child {
+    margin-right: 0;
+}
+
+.mdp-breadcrumb a,
+.mdp-breadcrumb-item > span:not(.mdp-breadcrumb-sep):not(.mdp-breadcrumb-current) {
+    /* Truncate very long crumb text rather than blowing out the line. */
+    max-width: 32ch;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    display: inline-block;
+    vertical-align: bottom;
+}
+
+.mdp-breadcrumb a {
+    color: var(--links, inherit);
+    text-decoration: none;
+}
+
+.mdp-breadcrumb a:hover,
+.mdp-breadcrumb a:focus {
+    text-decoration: underline;
+}
+
+.mdp-breadcrumb-sep {
+    color: var(--fg, inherit);
+    opacity: 0.65;
+    user-select: none;
+}
+
+.mdp-breadcrumb-current {
+    font-weight: 600;
+    color: var(--fg, inherit);
+    max-width: 40ch;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    display: inline-block;
+    vertical-align: bottom;
+}
+
+/* Italicize draft (link-less) chapters in the sidebar so they don't look
+   identical to clickable ones. mdbook renders draft entries as a plain
+   <span> inside chapter-link-wrapper. */
+.sidebar .chapter-item > .chapter-link-wrapper > span:first-child {
+    font-style: italic;
+    opacity: 0.75;
+}
+
+@media print {
+    .mdp-breadcrumb {
+        border: 0;
+        opacity: 1;
+    }
+    .mdp-breadcrumb a {
+        color: inherit;
+        text-decoration: none;
+    }
+}

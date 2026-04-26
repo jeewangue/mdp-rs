@@ -29,6 +29,8 @@ pub fn run(
         );
     }
 
+    ensure_latex_engine(&pandoc_to)?;
+
     let workspace = Workspace::prepare(&dir, title)?;
     let book_toml = workspace.root.join("book.toml");
     tracing::info!("pdf workspace at {}", workspace.root.display());
@@ -133,19 +135,27 @@ pub fn run(
 
 
     // Run the build — this triggers both [output.html] and [output.pandoc] renderers.
-    let status = Command::new("mdbook")
-        .arg("build")
-        .arg(&workspace.root)
-        .status()
-        .context("failed to spawn mdbook build")?;
-    if !status.success() {
+    // Watchdog wraps the spawn: lualatex deep down the chain is the most common
+    // wedge point on SVG-heavy or memory-blowup docs. Stall-detection
+    // (no-output-for-N-seconds) is the strongest signal the underlying TeX
+    // engine is stuck, since healthy lualatex prints page-by-page progress.
+    let mut cmd = Command::new("mdbook");
+    cmd.arg("build").arg(&workspace.root);
+    // Defaults: 600s overall (LaTeX builds CAN legitimately take ~5min on
+    // larger docs); 60s stall — lualatex prints at least one line per page.
+    let wd = super::Watchdog::from_env(600, 60);
+    let result = super::run_with_watchdog(cmd, "mdbook build (pdf)", wd);
+    if let Err(e) = result {
         if std::env::var_os("MDP_KEEP_WORKSPACE").is_some() {
             // Leak the TempDir so the user can inspect book.toml + generated .tex / logs.
             let root = workspace.root.clone();
             std::mem::forget(workspace);
-            tracing::error!("preserved workspace at {} (MDP_KEEP_WORKSPACE set)", root.display());
+            tracing::error!(
+                "preserved workspace at {} (MDP_KEEP_WORKSPACE set)",
+                root.display()
+            );
         }
-        anyhow::bail!("mdbook build failed: {status}");
+        return Err(e);
     }
 
     // mdbook-pandoc writes output. Location depends on renderer count:
@@ -244,6 +254,25 @@ fn ensure_deps() -> Result<()> {
         anyhow::bail!(
             "missing tools: {}. install with: cargo install mdbook-pandoc (+ system pandoc)",
             missing.join(", ")
+        );
+    }
+    Ok(())
+}
+
+/// `pandoc-to=latex` (the default profile) shells out to lualatex; without
+/// it pandoc surfaces a cryptic mid-build error long after the user thinks
+/// the build is succeeding. Pre-flight here so the failure is a clear "your
+/// system is missing X" message before any work starts.
+fn ensure_latex_engine(pandoc_to: &str) -> Result<()> {
+    if pandoc_to != "latex" {
+        return Ok(());
+    }
+    if which::which("lualatex").is_err() {
+        anyhow::bail!(
+            "missing lualatex (required for --pandoc-to=latex). install texlive-luatex \
+             (Arch: `pacman -S texlive-luatex texlive-langkorean`; Debian/Ubuntu: \
+             `apt install texlive-luatex texlive-lang-korean`) or pass \
+             --pandoc-to=html for an HTML-only build."
         );
     }
     Ok(())
