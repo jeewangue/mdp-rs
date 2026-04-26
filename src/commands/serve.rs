@@ -1,12 +1,14 @@
 use anyhow::{Context, Result};
 use std::net::{IpAddr, SocketAddr, TcpListener};
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::process::Command;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
-use crate::preset::{Workspace, resync_workspace_src};
+use crate::preset::{Workspace, list_md_files_set, resync_workspace_src};
+use std::collections::BTreeSet;
+use std::sync::Mutex;
 
 /// How many sequential ports to try after the requested one before giving up.
 /// 16 covers "every nvim window in a typical session" with room to spare.
@@ -211,10 +213,18 @@ impl Drop for WatcherHandle {
     }
 }
 
-/// Watch `src_canonical` for file system events; on .md add/remove/rename
+/// Watch `src_canonical` for filesystem events; on .md add/remove/rename
 /// (NOT modify — mdbook --watch handles content edits via the symlinks),
 /// re-mirror + regenerate SUMMARY.md so newly-added pages appear in the
 /// sidebar without restarting `mdp serve`.
+///
+/// notify-debouncer-mini's `DebouncedEventKind` is `Any | AnyContinuous` —
+/// it does NOT distinguish create from modify from delete. Dispatching on
+/// kind alone would resync on every save, wiping the workspace symlinks for
+/// the duration of the rebuild and causing mdbook --watch to render an empty
+/// book mid-flight (= 404 in the browser when clicking a link). To avoid
+/// that, we maintain a sorted set of relative `.md` paths and only resync
+/// when the SET differs (add/remove/rename), not on content edits.
 fn spawn_summary_watcher(src_canonical: PathBuf, ws: &Workspace) -> WatcherHandle {
     use notify_debouncer_mini::{notify::RecursiveMode, new_debouncer, DebouncedEvent};
 
@@ -224,31 +234,47 @@ fn spawn_summary_watcher(src_canonical: PathBuf, ws: &Workspace) -> WatcherHandl
     let book_src_for_cb = book_src.clone();
     let src_for_cb = src_canonical.clone();
 
+    // Seed with the current set so the first event compares against reality,
+    // not against an empty set (which would force a spurious resync).
+    let known_set: Arc<Mutex<BTreeSet<PathBuf>>> = Arc::new(Mutex::new(
+        list_md_files_set(&src_canonical).unwrap_or_default(),
+    ));
+    let known_set_for_cb = known_set.clone();
+
     let debouncer = new_debouncer(
         Duration::from_millis(500),
         move |res: Result<Vec<DebouncedEvent>, _>| {
             if stop_for_cb.load(Ordering::SeqCst) {
                 return;
             }
-            let events = match res {
-                Ok(ev) => ev,
+            if let Err(e) = res {
+                tracing::warn!("watch error: {e}");
+                return;
+            }
+            // Recompute the .md set; compare to last known. Anything that's
+            // just a content-modify keeps the set identical → skip resync.
+            // Add/remove/rename changes the set → resync.
+            let new_set = match list_md_files_set(&src_for_cb) {
+                Ok(s) => s,
                 Err(e) => {
-                    tracing::warn!("watch error: {e}");
+                    tracing::warn!("source scan failed: {e}");
                     return;
                 }
             };
-            // Only resync when at least one .md file changed. Reduces churn
-            // when the user saves something else under the source dir.
-            let needs_resync = events
-                .iter()
-                .any(|e| is_md_file(&e.path) && !is_inside(&e.path, &book_src_for_cb));
-            if !needs_resync {
-                return;
+            let mut known = known_set_for_cb.lock().expect("known_set poisoned");
+            if *known == new_set {
+                return; // content edit only — mdbook --watch handles it
             }
-            tracing::info!("source changed — resyncing SUMMARY");
+            let added = new_set.difference(&known).count();
+            let removed = known.difference(&new_set).count();
+            tracing::info!(
+                "source set changed (+{added} -{removed}) — resyncing SUMMARY"
+            );
             if let Err(e) = resync_workspace_src(&book_src_for_cb, &src_for_cb) {
                 tracing::warn!("resync failed: {e}");
+                return;
             }
+            *known = new_set;
         },
     );
 
@@ -267,14 +293,6 @@ fn spawn_summary_watcher(src_canonical: PathBuf, ws: &Workspace) -> WatcherHandl
 
     tracing::debug!("watching {} for SUMMARY regen", src_canonical.display());
     WatcherHandle { stop, _debouncer: Some(Box::new(debouncer)) }
-}
-
-fn is_md_file(p: &Path) -> bool {
-    p.extension().and_then(|s| s.to_str()).is_some_and(|e| e.eq_ignore_ascii_case("md"))
-}
-
-fn is_inside(p: &Path, root: &Path) -> bool {
-    p.starts_with(root)
 }
 
 fn run_cmd(cmd: &mut Command, label: &str) -> Result<()> {

@@ -67,6 +67,69 @@ impl Workspace {
     }
 }
 
+/// Walk `src_canonical` with the same exclusion + symlink-safety rules as
+/// `mirror_md_files`, but only collect relative `.md` paths. Used by the
+/// `serve --watch` watcher to detect *set* changes (add/remove/rename) and
+/// skip resync on pure content modifications — content changes are picked up
+/// by mdbook's own --watch via the symlinks, so resyncing on every save is
+/// both wasted work and a 404 race window.
+pub fn list_md_files_set(src_canonical: &Path) -> std::io::Result<std::collections::BTreeSet<PathBuf>> {
+    let mut out: std::collections::BTreeSet<PathBuf> = Default::default();
+    let mut visited: HashSet<PathBuf> = HashSet::new();
+    visited.insert(src_canonical.to_path_buf());
+    walk_md_set(src_canonical, src_canonical, &mut out, &mut visited)?;
+    Ok(out)
+}
+
+fn walk_md_set(
+    src: &Path,
+    canonical_root: &Path,
+    out: &mut std::collections::BTreeSet<PathBuf>,
+    visited: &mut HashSet<PathBuf>,
+) -> std::io::Result<()> {
+    let rd = match std::fs::read_dir(src) {
+        Ok(rd) => rd,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(e) => return Err(e),
+    };
+    for entry in rd.flatten() {
+        let path = entry.path();
+        let md = match std::fs::symlink_metadata(&path) {
+            Ok(m) => m,
+            Err(_) => continue,
+        };
+        if md.file_type().is_symlink() {
+            let resolved = match path.canonicalize() {
+                Ok(p) => p,
+                Err(_) => continue,
+            };
+            if !resolved.starts_with(canonical_root) {
+                continue;
+            }
+        }
+        if path.is_dir() {
+            if let Some(name) = path.file_name().and_then(|n| n.to_str())
+                && is_excluded_dir(name)
+            {
+                continue;
+            }
+            let canonical = match path.canonicalize() {
+                Ok(p) => p,
+                Err(_) => continue,
+            };
+            if !visited.insert(canonical) {
+                continue;
+            }
+            walk_md_set(&path, canonical_root, out, visited)?;
+        } else if path.extension().and_then(|e| e.to_str()) == Some("md")
+            && let Ok(rel) = path.strip_prefix(canonical_root)
+        {
+            out.insert(rel.to_path_buf());
+        }
+    }
+    Ok(())
+}
+
 /// Free-function form of `Workspace::resync` for use by the file watcher,
 /// which can't hold a `&Workspace` across a thread boundary (TempDir doesn't
 /// satisfy the bounds). Wipes per-file symlinks and re-runs mirror+summary.
@@ -779,6 +842,66 @@ additional-js = ["http://evil/x.js"]
 
     #[test]
     #[cfg(unix)]
+    fn list_md_files_set_ignores_modify_only() {
+        // Same paths after a modify → set must compare equal.
+        let src = tempfile::tempdir().unwrap();
+        let root = src.path();
+        std::fs::write(root.join("a.md"), "# A").unwrap();
+        std::fs::create_dir_all(root.join("sub")).unwrap();
+        std::fs::write(root.join("sub/b.md"), "# B").unwrap();
+        let canonical = root.canonicalize().unwrap();
+
+        let before = super::list_md_files_set(&canonical).unwrap();
+        // Edit content (modify-in-place); paths unchanged.
+        std::fs::write(root.join("a.md"), "# A — edited").unwrap();
+        let after = super::list_md_files_set(&canonical).unwrap();
+        assert_eq!(before, after, "modify-only must not change the set");
+    }
+
+    #[test]
+    fn list_md_files_set_detects_add_remove_rename() {
+        let src = tempfile::tempdir().unwrap();
+        let root = src.path();
+        std::fs::write(root.join("a.md"), "# A").unwrap();
+        let canonical = root.canonicalize().unwrap();
+
+        let s0 = super::list_md_files_set(&canonical).unwrap();
+        assert_eq!(s0.len(), 1);
+
+        // Add
+        std::fs::write(root.join("b.md"), "# B").unwrap();
+        let s1 = super::list_md_files_set(&canonical).unwrap();
+        assert_ne!(s0, s1);
+        assert_eq!(s1.len(), 2);
+
+        // Rename
+        std::fs::rename(root.join("b.md"), root.join("c.md")).unwrap();
+        let s2 = super::list_md_files_set(&canonical).unwrap();
+        assert_ne!(s1, s2);
+
+        // Remove
+        std::fs::remove_file(root.join("a.md")).unwrap();
+        let s3 = super::list_md_files_set(&canonical).unwrap();
+        assert_ne!(s2, s3);
+        assert_eq!(s3.len(), 1);
+    }
+
+    #[test]
+    fn list_md_files_set_skips_excluded_dirs() {
+        let src = tempfile::tempdir().unwrap();
+        let root = src.path();
+        std::fs::write(root.join("keep.md"), "# K").unwrap();
+        for d in ["node_modules", "target", ".git", ".claude"] {
+            std::fs::create_dir_all(root.join(d)).unwrap();
+            std::fs::write(root.join(d).join("hidden.md"), "# H").unwrap();
+        }
+        let canonical = root.canonicalize().unwrap();
+        let s = super::list_md_files_set(&canonical).unwrap();
+        assert_eq!(s.len(), 1);
+        assert!(s.contains(std::path::Path::new("keep.md")));
+    }
+
+    #[test]
     fn mirror_md_files_skips_excluded_dirs() {
         // Tree:
         //   root/keep.md
