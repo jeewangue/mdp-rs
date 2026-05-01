@@ -1,12 +1,3 @@
-/*
- * julian.jee theme — palette ported from ~/.config/nvim/assets/markdown-preview/markdown.css
- *
- * Heading colors:  deep red  →  red-brown  →  orange  →  gold  →  tan
- * Strong text:     teal
- * Inline code:     gold on secondary bg
- * Base palette:    GitHub-like light/dark with data-theme toggle
- */
-
 :root {
   --julianjee-h1: #ae2102;
   --julianjee-h2: #bb3e03;
@@ -17,16 +8,9 @@
   --julianjee-strong: #94d2bd;
   --julianjee-inline-code: #ee9b00;
 
-  /* Bump mdbook's 750px default. 1100px is the sweet spot for technical
-   * docs with code blocks + tables — narrow enough that prose stays
-   * readable on wide displays, wide enough that code samples don't
-   * wrap awkwardly. mdbook's own `.content main` rule reads this var
-   * and applies `margin-inline: auto` so the content stays centered
-   * regardless of viewport width. */
   --content-max-width: 1100px;
 }
 
-/* ------------- julian.jee LIGHT ------------- */
 .julian-jee {
   --bg: #fff;
   --fg: #333;
@@ -44,7 +28,6 @@
   --searchresults-li-bg: #e4f2fe;
   --search-mark-bg: #a2cff5;
   --links: #4078c0;
-  --inline-code-color: var(--julianjee-inline-code);
   --inline-code-bg: #fafbfc;
   --theme-popup-bg: #fafbfc;
   --theme-popup-border: #cccccc;
@@ -65,7 +48,6 @@
 .julian-jee h6 { color: var(--julianjee-h6); }
 .julian-jee strong { color: var(--julianjee-strong); }
 
-/* ------------- julian.jee DARK ------------- */
 .julian-jee-dark {
   --bg: #0d1117;
   --fg: #c9d1d9;
@@ -83,7 +65,6 @@
   --searchresults-li-bg: #21262d;
   --search-mark-bg: #ca6702;
   --links: #58a6ff;
-  --inline-code-color: var(--julianjee-inline-code);
   --inline-code-bg: #161b22;
   --theme-popup-bg: #161b22;
   --theme-popup-border: #30363d;

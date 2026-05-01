@@ -30,16 +30,12 @@ impl Workspace {
 
         let src_canonical = src_dir.canonicalize().context("source dir must exist")?;
 
-        // Mirror ONLY `.md` files from the user's dir into `src/` as per-file
-        // symlinks.
-        //
-        // Earlier versions symlinked the entire user dir. That's cheaper but
-        // mdbook walks the whole src tree WITHOUT honoring our exclusion list,
-        // so node_modules self-loops (`foo/node_modules/foo -> ../..`, common
-        // in npm peer-dep setups) crashed the build with "Too many levels of
-        // symbolic links". Per-file mirroring keeps mdbook scoped to files we
-        // whitelisted while inotify still fires on edits because it follows
-        // symlinks.
+        // Per-file `.md` symlinks only — symlinking the entire user dir
+        // would expose `node_modules` self-loops (`foo/node_modules/foo ->
+        // ../..`) to mdbook's recursive walker, which doesn't honor our
+        // exclusion list and crashes with "Too many levels of symbolic
+        // links". Per-file scoping keeps mdbook on files we whitelisted
+        // while inotify still fires on edits through the symlink.
         Self::do_mirror_and_summary(&book_src, &src_canonical)?;
 
         let cfg = BookConfig::new(&src_canonical, title_override)?;

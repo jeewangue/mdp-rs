@@ -8,7 +8,8 @@ user-facing reference; this file is the agent contract.
 
 - **CLI dispatch** (`src/main.rs`, `src/commands/mod.rs`) — clap-based
   subcommands `serve`, `build`, `pdf`, `install-deps`. `ensure_tools`
-  preflights every external dep with a clear install hint per OS.
+  preflights every external dep and on miss prints a `mdp install-deps`
+  hint.
 - **Workspace generation** (`src/preset.rs`) — copies user's `.md` tree
   into a temp workspace, generates `book.toml` (with `language` resolved
   from `MDP_BOOK_LANG` / `$LANG` / "en"), generates `SUMMARY.md` from a
@@ -20,7 +21,8 @@ user-facing reference; this file is the agent contract.
 - **Live reload (`mdp serve`)** — `notify-debouncer-mini` watches the
   source dir. On `.md` add / rename / delete it regenerates SUMMARY;
   modify-only events do NOT resync (set-diff filter on the file list)
-  to avoid the 404-loop bug fixed in `60f34da`.
+  because resyncing on every save creates a 404 race window between
+  the regenerated SUMMARY and mdbook's HTML rebuild.
 - **PDF (`mdp pdf`)** — runs `mdbook-pandoc` then `lualatex`. Wraps both
   in `run_with_watchdog` with stall + overall timers (`MDP_PDF_TIMEOUT`,
   `MDP_PDF_STALL_TIMEOUT`) and Unix `setpgid` for cascade kill.
@@ -28,9 +30,9 @@ user-facing reference; this file is the agent contract.
 ## Stack
 
 - Stable Rust, edition 2024. `rust-toolchain.toml` pins toolchain.
-- mdbook + 5 preprocessors (`mdbook-katex`, `mdbook-mermaid`,
-  `mdbook-plantuml`, `mdbook-pagetoc`, `mdbook-alerts`, optionally
-  `mdbook-pandoc` for PDF).
+- mdbook (0.5+, native GFM alerts) + 4 preprocessors (`mdbook-katex`,
+  `mdbook-mermaid`, `mdbook-plantuml`, `mdbook-pagetoc`), plus
+  `mdbook-pandoc` for the PDF path.
 - `notify-debouncer-mini` for filesystem watch.
 - `tracing` for logging.
 - `assert_cmd` + `tempfile` for integration tests.
@@ -72,10 +74,10 @@ asset path through `assets/` and verify smoke still passes.
   set; only re-run SUMMARY generation if the set changed (add / rename
   / delete). Pure modifies are passed through to mdbook live reload as
   HTML rebuilds.
-- **`SUMMARY.md` in the user's source tree is treated as poison.** It's
-  an mdbook artifact from earlier bug behaviour and is gitignored at
-  the project root. Don't ever generate `SUMMARY.md` in the user's
-  source dir — it goes in the workspace temp dir.
+- **Never generate `SUMMARY.md` in the user's source dir.** It's an
+  mdbook artifact and belongs in the workspace temp dir. The project
+  root gitignores it as a guard against accidental writes leaking into
+  the user's tree.
 - **Don't drop `cargo:rerun-if-changed`.** `rust-embed` reads at compile
   time; without the rerun hint, edits to `assets/` silently no-op until
   you `cargo clean`.
@@ -84,18 +86,19 @@ asset path through `assets/` and verify smoke still passes.
   remove `run_with_watchdog`; if you bypass it for a one-off, set
   `MDP_KEEP_WORKSPACE=1` so the temp dir survives for inspection.
 - **PlantUML local-binary execution is refused.** `MDP_PLANTUML_SERVER`
-  must be an HTTPS URL. Path-style values are rejected at config parse
-  to keep us off the local-codeexec path.
+  must be an `http://` or `https://` URL. Path-style values are
+  rejected at config parse to keep us off the local-codeexec path.
 
 ## Configuration env vars
 
 | Var | Default | Effect |
 | --- | ------- | ------ |
 | `MDP_PORT` | `3456` | `serve --port` override. |
-| `MDP_HOST` | `127.0.0.1` | Non-loopback requires `MDP_ALLOW_NON_LOOPBACK=1`. |
+| `MDP_HOST` | `127.0.0.1` | Bind address. Non-loopback requires `MDP_ALLOW_NON_LOOPBACK`. |
+| `MDP_ALLOW_NON_LOOPBACK` | unset | When `1`, lets `MDP_HOST` bind to a non-`127.x.x.x` address. |
 | `MDP_BOOK_LANG` | `$LANG` first BCP-47 segment, fallback `en` | `<html lang>` value. |
-| `MDP_AUTHOR` | `$USER` | Author string in generated `book.toml`. |
-| `MDP_PLANTUML_SERVER` | `https://www.plantuml.com/plantuml` | HTTPS only. |
+| `MDP_AUTHOR` | `$USER` → `$USERNAME` → `mdp` | Author string in generated `book.toml`. |
+| `MDP_PLANTUML_SERVER` | `https://www.plantuml.com/plantuml` | `http://` or `https://` URL. Path-style refused. |
 | `MDP_PDF_TIMEOUT` | `600` | Overall PDF build timeout (s). `0` disables. |
 | `MDP_PDF_STALL_TIMEOUT` | `60` | Kill PDF build after N seconds of no output. |
 | `MDP_KEEP_WORKSPACE` | unset | Preserve temp workspace on PDF failure. |

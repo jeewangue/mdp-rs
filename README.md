@@ -50,7 +50,7 @@ mdp pdf   ./docs --pandoc-to html5  # self-contained HTML instead of PDF
 - KaTeX math, Mermaid + PlantUML diagrams (PlantUML inlined as data-URI SVG for PDF)
 - GFM alerts (`> [!NOTE]`, `> [!WARNING]` …) via mdbook native
 - Full-text search (mark.js)
-- `mdp serve --watch` regenerates SUMMARY on `.md` add / rename / delete
+- `mdp serve` regenerates SUMMARY automatically on `.md` add / rename / delete
 - "julian.jee" theme — palette ported from Julian's nvim markdown preview
 
 ## Configuration
@@ -58,10 +58,11 @@ mdp pdf   ./docs --pandoc-to html5  # self-contained HTML instead of PDF
 | Env var                  | Default | Effect                                                                    |
 | ------------------------ | ------- | ------------------------------------------------------------------------- |
 | `MDP_PORT`               | `3456`  | Override `--port`.                                                        |
-| `MDP_HOST`               | `127.0.0.1` | Override `--host`. Non-loopback requires `MDP_ALLOW_NON_LOOPBACK=1`.  |
+| `MDP_HOST`               | `127.0.0.1` | Override `--host`. Non-loopback requires `MDP_ALLOW_NON_LOOPBACK`.    |
+| `MDP_ALLOW_NON_LOOPBACK` | _unset_ | Set to `1` to let `MDP_HOST` bind to a non-loopback address.              |
 | `MDP_BOOK_LANG`          | `$LANG` → `en` | `<html lang>` value; first BCP-47 segment of `$LANG`/`$LC_ALL`.    |
 | `MDP_AUTHOR`             | `$USER` | Author string in generated `book.toml`.                                   |
-| `MDP_PLANTUML_SERVER`    | plantuml.com | HTTPS PlantUML server. Local binary paths refused.                   |
+| `MDP_PLANTUML_SERVER`    | plantuml.com | `http://` or `https://` PlantUML server. Path-style refused.         |
 | `MDP_PDF_TIMEOUT`        | `600`   | Overall PDF build timeout (seconds; `0` to disable).                      |
 | `MDP_PDF_STALL_TIMEOUT`  | `60`    | Kill PDF build after N seconds of no output (lualatex hang detection).    |
 | `MDP_KEEP_WORKSPACE`     | _unset_ | Preserve the temp workspace on PDF failure for inspection.                |

@@ -1,8 +1,3 @@
-/*
- * julian.jee — content area styling
- * complements mdbook's general.css; applied via additional-css in book.toml
- */
-
 .content {
   font-family: "Helvetica Neue", Helvetica, "Segoe UI", Arial, freesans, sans-serif,
                "Apple Color Emoji", "Segoe UI Emoji", "Segoe UI Symbol";
@@ -14,7 +9,6 @@
   font-size: 85%;
 }
 
-/* inline code — golden on subtle bg */
 .content :not(pre) > code {
   color: var(--julianjee-inline-code);
   background-color: var(--inline-code-bg);
@@ -23,7 +17,6 @@
   border: 1px solid var(--quote-border);
 }
 
-/* headings — colors set in variables.css per theme, here: spacing + weight */
 .content h1, .content h2, .content h3, .content h4, .content h5, .content h6 {
   font-weight: bold;
   line-height: 1.4;
@@ -36,19 +29,17 @@
 .content h3 { font-size: 1.5em;  line-height: 1.43; }
 .content h4 { font-size: 1.25em; }
 .content h5 { font-size: 1em; }
-/* H6: explicit high-specificity override — mdbook default has `.content h6` too
- * so we match specificity and win by load-order (general.css is loaded last). */
+/* H6 needs the theme-class prefix to match mdbook's `.julian-jee .content h6`
+ * specificity; without it our color rule loses to mdbook's default. */
 .content h6,
 .julian-jee-dark .content h6,
 .julian-jee .content h6 { font-size: 1em; color: var(--julianjee-h6); }
 
-/* strong — teal (signature color) */
 .content strong {
   color: var(--julianjee-strong);
   font-weight: bold;
 }
 
-/* blockquote — GitHub-style left border */
 .content blockquote {
   color: var(--fg-muted);
   border-left: 4px solid var(--quote-border);
@@ -58,7 +49,6 @@
   margin-right: 0;
 }
 
-/* tables — stripe + borders */
 .content table {
   display: block;
   width: 100%;
@@ -87,7 +77,6 @@
   background-color: var(--table-header-bg);
 }
 
-/* links */
 .content a {
   color: var(--links);
   text-decoration: none;
@@ -96,7 +85,6 @@
   text-decoration: underline;
 }
 
-/* hr */
 .content hr {
   margin: 20px 0;
   height: 0;
@@ -104,7 +92,6 @@
   border-top: 1px solid var(--quote-border);
 }
 
-/* code blocks — padded */
 .content pre {
   padding: 16px;
   overflow: auto;
@@ -112,38 +99,24 @@
   border-radius: 3px;
 }
 
-/* task list checkboxes — cosmetic alignment */
 .content ul.task-list,
 .content li.task-list-item {
   list-style-type: none;
 }
 
-/* sidebar active heading — accent (matches H1) */
 .sidebar .chapter li.chapter-item a.active,
 .sidebar .chapter li.chapter-item strong {
   color: var(--sidebar-active);
 }
 
-/* Hide the RIGHT-side page TOC — the left sidebar (mdbook-pagetoc nested under
- * the current chapter in SUMMARY) already shows heading-level navigation, so the
- * right one is redundant. */
+/* Hide the right-side page TOC. mdbook-pagetoc itself stays enabled in
+ * book.toml — we still consume its heading entries for the left sidebar
+ * (see the `.sidebar .chapter li a` rule below); only the right-rail
+ * widget is suppressed. */
 nav.pagetoc {
   display: none !important;
 }
-/* Content width is controlled via `--content-max-width` in variables.css.
- * mdbook ships `.content main { margin-inline: auto; max-width:
- * var(--content-max-width); }` so we don't need to redeclare the rule.
- *
- * Floating prev/next arrows (`.nav-wide-wrapper .nav-chapters`) used to
- * be hidden here because mdbook positioned them viewport-anchored
- * (`left: 0`) and the `.previous` button overlapped the sidebar.
- * Current mdbook positions the arrows at `left: var(--sidebar-width)`
- * / `right: 0`, sidebar-aware, so they sit naturally in the gutter
- * between sidebar and the (now centered) content. The hide rule was
- * removed alongside the `--content-max-width: 1100px` cap. */
 
-/* Style the left-sidebar heading entries injected by mdbook-pagetoc. These are
- * added as nested chapter-items under the currently active chapter. */
 .sidebar .chapter li a {
   color: var(--sidebar-fg);
 }
@@ -152,7 +125,7 @@ nav.pagetoc {
   font-weight: bold;
 }
 
-/* GFM alerts (mdbook 0.5+ native admonition support) */
+/* GFM alerts (mdbook 0.5+) */
 .alert {
   padding: 0.5em 1em;
   margin: 1em 0;

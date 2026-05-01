@@ -234,11 +234,12 @@ fn spawn_summary_watcher(src_canonical: PathBuf, ws: &Workspace) -> WatcherHandl
     let book_src_for_cb = book_src.clone();
     let src_for_cb = src_canonical.clone();
 
-    // Seed with the current set so the first event compares against reality,
-    // not against an empty set (which would force a spurious resync).
-    let known_set: Arc<Mutex<BTreeSet<PathBuf>>> = Arc::new(Mutex::new(
-        list_md_files_set(&src_canonical).unwrap_or_default(),
-    ));
+    // The known-set is seeded AFTER the watcher arms, so additions made in
+    // the gap between snapshot and arm-time aren't silently swallowed (they
+    // generate events that, with a pre-arm seed, would compare equal and
+    // skip the resync). Until seeded, the closure compares against `None`
+    // and treats any event as a real change.
+    let known_set: Arc<Mutex<Option<BTreeSet<PathBuf>>>> = Arc::new(Mutex::new(None));
     let known_set_for_cb = known_set.clone();
 
     let debouncer = new_debouncer(
@@ -251,9 +252,6 @@ fn spawn_summary_watcher(src_canonical: PathBuf, ws: &Workspace) -> WatcherHandl
                 tracing::warn!("watch error: {e}");
                 return;
             }
-            // Recompute the .md set; compare to last known. Anything that's
-            // just a content-modify keeps the set identical → skip resync.
-            // Add/remove/rename changes the set → resync.
             let new_set = match list_md_files_set(&src_for_cb) {
                 Ok(s) => s,
                 Err(e) => {
@@ -262,19 +260,23 @@ fn spawn_summary_watcher(src_canonical: PathBuf, ws: &Workspace) -> WatcherHandl
                 }
             };
             let mut known = known_set_for_cb.lock().expect("known_set poisoned");
-            if *known == new_set {
+            if known.as_ref() == Some(&new_set) {
                 return; // content edit only — mdbook --watch handles it
             }
-            let added = new_set.difference(&known).count();
-            let removed = known.difference(&new_set).count();
-            tracing::info!(
-                "source set changed (+{added} -{removed}) — resyncing SUMMARY"
-            );
+            if let Some(prev) = known.as_ref() {
+                let added = new_set.difference(prev).count();
+                let removed = prev.difference(&new_set).count();
+                tracing::info!(
+                    "source set changed (+{added} -{removed}) — resyncing SUMMARY"
+                );
+            } else {
+                tracing::info!("first event before seed completed — resyncing SUMMARY");
+            }
             if let Err(e) = resync_workspace_src(&book_src_for_cb, &src_for_cb) {
                 tracing::warn!("resync failed: {e}");
                 return;
             }
-            *known = new_set;
+            *known = Some(new_set);
         },
     );
 
@@ -290,6 +292,9 @@ fn spawn_summary_watcher(src_canonical: PathBuf, ws: &Workspace) -> WatcherHandl
         tracing::warn!("failed to watch {}: {e}", src_canonical.display());
         return WatcherHandle { stop, _debouncer: None };
     }
+
+    *known_set.lock().expect("known_set poisoned") =
+        Some(list_md_files_set(&src_canonical).unwrap_or_default());
 
     tracing::debug!("watching {} for SUMMARY regen", src_canonical.display());
     WatcherHandle { stop, _debouncer: Some(Box::new(debouncer)) }

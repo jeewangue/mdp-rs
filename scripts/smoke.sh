@@ -1,16 +1,12 @@
 #!/usr/bin/env bash
 # Clean-room smoke gate for `mdp`. Builds the release binary, copies it to a
 # pristine mktemp dir, and runs `mdp build` against a synthesised fixture
-# that exercises every fragile path: nested directories, index.md vs README
+# exercising the fragile paths: nested directories, index.md vs README
 # fallback, draft chapters, Hangul titles, KaTeX math, code fences.
 #
-# This is the artifact-as-shipped check. It exists because the discord-
-# plugin-patches sister project shipped a deploy bug where `make apply` only
-# copied server.ts (forgot lib/) — tests passed because they imported from
-# the dev tree, never the deployed subset. The same class of bug here would
-# be a missed asset embed or a preprocessor reference with no source. This
-# script forces an end-to-end run from outside the repo cwd so the deploy
-# graph cannot be silently completed by stale local files.
+# Runs from outside the repo cwd so a missed asset embed (rust-embed has no
+# Cargo dep tracking by default — see build.rs) or a stale local reference
+# can't be silently masked by files in the dev tree.
 #
 # Exit codes:  0 = pass, 1 = real failure, 77 = skip (toolchain missing).
 set -euo pipefail
@@ -56,9 +52,6 @@ mkdir -p \
 
 cat >"$FIX/index.md" <<'EOF'
 # Smoke Root
-
-Welcome page. Used to verify the root-level index path and breadcrumb
-asset embedding.
 EOF
 
 cat >"$FIX/top.md" <<'EOF'
@@ -123,8 +116,7 @@ fail() {
   exit 1
 }
 
-# A1: hierarchical sidebar (nested <ol class="section">) — proves we didn't
-# regress to the flat-list bug Round 1 fixed.
+# A1: hierarchical sidebar (nested <ol class="section">).
 grep -q '<ol class="section">' "$OUT/toc.html" \
   || fail "no <ol class=\"section\"> in toc.html (sidebar flat?)"
 

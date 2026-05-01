@@ -1,9 +1,7 @@
 // Tell Cargo to rebuild whenever any file under `assets/` changes. rust-embed
-// reads `#[folder = "assets/"]` at compile time, but Cargo doesn't know about
-// the folder dependency by default — so editing a CSS/JS theme asset (or
-// adding a new template) silently no-ops `cargo build` until something else
-// in the crate triggers a rebuild. The smoke gate caught this footgun; this
-// build script closes it.
+// reads `#[folder = "assets/"]` at compile time, but Cargo doesn't track the
+// folder by default — without these hints, editing a CSS/JS theme asset
+// silently no-ops `cargo build` until something else triggers a rebuild.
 
 fn main() {
     println!("cargo:rerun-if-changed=assets");
