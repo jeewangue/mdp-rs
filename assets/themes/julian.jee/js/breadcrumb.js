@@ -107,14 +107,19 @@
     const chain = [];
     let li = active.closest('li');
     while (li) {
+      // Exclude `.chapter-fold-toggle` — mdbook renders it as `<a><div>❱</div></a>`
+      // inside `.chapter-link-wrapper`, so a naive `:scope > .chapter-link-wrapper > a`
+      // would match the toggle on draft chapters (those rendered as <span>, like
+      // a directory with no index.md/README.md) and produce a `❱` crumb.
       const link =
-        li.querySelector(':scope > .chapter-link-wrapper > a') ||
-        li.querySelector(':scope > a');
+        li.querySelector(':scope > .chapter-link-wrapper > a:not(.chapter-fold-toggle)') ||
+        li.querySelector(':scope > a:not(.chapter-fold-toggle)');
+      // Draft chapter (no link) — mdbook renders the title as a plain <span>
+      // sibling of the toggle. Pull text from there.
       const fallbackSpan = li.querySelector(
         ':scope > .chapter-link-wrapper > span:not(.chapter-fold-toggle)'
       );
       const text = (link?.textContent || fallbackSpan?.textContent || '')
-        // Strip the "1.2.3." numbering mdbook auto-prepends.
         .replace(/^\s*\d+(\.\d+)*\.\s*/, '')
         .trim();
       if (text) {
@@ -123,7 +128,6 @@
           href: link?.getAttribute('href') || null,
         });
       }
-      // Walk up: the parent <ol class="section"> is wrapped by another <li>.
       li = li.parentElement?.closest('li') || null;
     }
 

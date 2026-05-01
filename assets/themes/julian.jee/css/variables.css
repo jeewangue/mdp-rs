@@ -16,6 +16,14 @@
   --julianjee-h6: #e9d8a6;
   --julianjee-strong: #94d2bd;
   --julianjee-inline-code: #ee9b00;
+
+  /* Bump mdbook's 750px default. 1100px is the sweet spot for technical
+   * docs with code blocks + tables — narrow enough that prose stays
+   * readable on wide displays, wide enough that code samples don't
+   * wrap awkwardly. mdbook's own `.content main` rule reads this var
+   * and applies `margin-inline: auto` so the content stays centered
+   * regardless of viewport width. */
+  --content-max-width: 1100px;
 }
 
 /* ------------- julian.jee LIGHT ------------- */

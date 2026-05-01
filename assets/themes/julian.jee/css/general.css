@@ -130,10 +130,9 @@
 nav.pagetoc {
   display: none !important;
 }
-/* reclaim the right margin for wider content */
-.content main {
-  max-width: none;
-}
+/* Content width is controlled via `--content-max-width` in variables.css.
+ * mdbook ships `.content main { margin-inline: auto; max-width:
+ * var(--content-max-width); }` so we don't need to redeclare the rule. */
 
 /* Hide the wide-screen floating prev/next arrows.
  *
