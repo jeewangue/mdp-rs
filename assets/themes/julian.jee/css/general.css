@@ -132,23 +132,15 @@ nav.pagetoc {
 }
 /* Content width is controlled via `--content-max-width` in variables.css.
  * mdbook ships `.content main { margin-inline: auto; max-width:
- * var(--content-max-width); }` so we don't need to redeclare the rule. */
-
-/* Hide the wide-screen floating prev/next arrows.
+ * var(--content-max-width); }` so we don't need to redeclare the rule.
  *
- * mdbook positions `.nav-wide-wrapper .nav-chapters` with
- * `position: fixed; left: 0; width: 90-150px` — viewport-anchored, not
- * sidebar-aware. With our sidebar visible (which takes up the leftmost
- * ~300px), the fixed `.previous` arrow overlaps the sidebar's chapter
- * list. Hovering a sidebar link is intercepted by the nav arrow's hover
- * zone, making those links unclickable.
- *
- * The `.nav-wrapper` (inline prev/next at page bottom) is still visible,
- * and left/right arrow keys still work, so this only removes the floating
- * edge arrows that were causing the conflict. */
-.nav-wide-wrapper {
-  display: none !important;
-}
+ * Floating prev/next arrows (`.nav-wide-wrapper .nav-chapters`) used to
+ * be hidden here because mdbook positioned them viewport-anchored
+ * (`left: 0`) and the `.previous` button overlapped the sidebar.
+ * Current mdbook positions the arrows at `left: var(--sidebar-width)`
+ * / `right: 0`, sidebar-aware, so they sit naturally in the gutter
+ * between sidebar and the (now centered) content. The hide rule was
+ * removed alongside the `--content-max-width: 1100px` cap. */
 
 /* Style the left-sidebar heading entries injected by mdbook-pagetoc. These are
  * added as nested chapter-items under the currently active chapter. */
