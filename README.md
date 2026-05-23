@@ -43,6 +43,12 @@ mdp pdf   ./docs -o ./book.pdf      # single PDF via lualatex
 mdp pdf   ./docs --pandoc-to html5  # self-contained HTML instead of PDF
 ```
 
+## Editor integration
+
+Neovim users: the companion plugin **[mdp.nvim](https://github.com/jeewangue/mdp.nvim)**
+wraps `mdp serve` as a background job with `:MdpToggle`, captured-URL
+notifications, and automatic browser open.
+
 ## Features
 
 - Hierarchical sidebar (per-dir `index.md` / `README.md` fallback) + breadcrumb
