@@ -35,6 +35,14 @@ local serving_dir = nil
 -- output; nil until then.
 local serving_url = nil
 
+-- Rolling log of `mdp serve` output (stdout + stderr). Inspect via :MdpLog.
+local log_lines = {}
+local LOG_MAX_LINES = 500
+
+-- Latch to avoid opening the browser twice when the URL line shows up on both
+-- stdout and stderr (mdbook routes "serving on" through stderr).
+local browser_opened = false
+
 local function default_root_finder(buf)
   local bufname = vim.api.nvim_buf_get_name(buf)
   if bufname == "" then
@@ -50,6 +58,36 @@ end
 
 local function is_running()
   return job_id ~= nil and job_id > 0
+end
+
+local function push_log(line)
+  table.insert(log_lines, line)
+  if #log_lines > LOG_MAX_LINES then
+    table.remove(log_lines, 1)
+  end
+end
+
+local function maybe_open_browser()
+  if browser_opened or not M.config.open_browser or not serving_url then
+    return
+  end
+  browser_opened = true
+  if vim.ui and type(vim.ui.open) == "function" then
+    vim.ui.open(serving_url)
+  else
+    vim.fn.jobstart({ "xdg-open", serving_url }, { detach = true })
+  end
+end
+
+--- Open a scratch buffer with the captured `mdp serve` log.
+function M.log()
+  vim.cmd("new")
+  local buf = vim.api.nvim_get_current_buf()
+  vim.bo[buf].buftype = "nofile"
+  vim.bo[buf].bufhidden = "wipe"
+  vim.bo[buf].swapfile = false
+  vim.api.nvim_buf_set_name(buf, "mdp://log")
+  vim.api.nvim_buf_set_lines(buf, 0, -1, false, log_lines)
 end
 
 local function url()
@@ -119,6 +157,8 @@ function M.open(opts)
     return
   end
 
+  -- Always start without `--open`; we open the browser ourselves once we have
+  -- the real serving URL (which may differ from --port after fallback).
   local cmd = {
     M.config.bin,
     "serve",
@@ -126,17 +166,17 @@ function M.open(opts)
     "--port", tostring(M.config.port),
     "--host", M.config.host,
   }
-  if M.config.open_browser then
-    table.insert(cmd, "--open")
-  end
 
-  -- Match `mdp: serving on http://…/` from stdout so we can recover the
+  -- Match `mdp: serving on http://…/` from stdout/stderr so we can recover the
   -- actual port (mdp falls back to the next free port when ours is taken).
   local function capture_url(line)
     local found = line:match("mdp: serving on (https?://[%w%-%.:%[%]/]+)")
     if found then
       serving_url = found
-      vim.notify("[mdp] " .. found, vim.log.levels.INFO)
+      vim.schedule(function()
+        vim.notify("[mdp] serving at " .. found, vim.log.levels.INFO)
+        maybe_open_browser()
+      end)
     end
   end
 
@@ -145,21 +185,16 @@ function M.open(opts)
     on_stdout = function(_, data, _)
       for _, line in ipairs(data or {}) do
         if line ~= "" then
+          push_log(line)
           capture_url(line)
-          vim.schedule(function()
-            vim.notify("[mdp] " .. line, vim.log.levels.INFO)
-          end)
         end
       end
     end,
     on_stderr = function(_, data, _)
       for _, line in ipairs(data or {}) do
         if line ~= "" then
+          push_log(line)
           capture_url(line)
-          vim.schedule(function()
-            -- mdbook uses stderr for INFO logs — show as info, not error.
-            vim.notify("[mdp] " .. line, vim.log.levels.INFO)
-          end)
         end
       end
     end,
@@ -167,13 +202,14 @@ function M.open(opts)
       vim.schedule(function()
         if code ~= 0 then
           vim.notify(
-            string.format("[mdp] serve exited with code %d", code),
+            string.format("[mdp] serve exited with code %d (run :MdpLog for details)", code),
             vim.log.levels.WARN
           )
         end
         job_id = nil
         serving_dir = nil
         serving_url = nil
+        browser_opened = false
       end)
     end,
   })
@@ -185,7 +221,7 @@ function M.open(opts)
   end
 
   serving_dir = dir
-  vim.notify(string.format("[mdp] serving %s at %s", dir, url()), vim.log.levels.INFO)
+  vim.notify(string.format("[mdp] starting on %s", dir), vim.log.levels.INFO)
 end
 
 --- Stop the running `mdp serve` job.

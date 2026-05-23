@@ -26,3 +26,7 @@ end, { desc = "Toggle mdp serve for the current buffer's directory" })
 cmd("MdpStatus", function()
   print(require("mdp").status())
 end, { desc = "Print mdp serve status" })
+
+cmd("MdpLog", function()
+  require("mdp").log()
+end, { desc = "Open captured mdp serve stdout/stderr log" })
