@@ -1,20 +1,20 @@
 use anyhow::{Context, Result};
 use std::process::Command;
 
-/// (crate name, semver requirement). Pinning is critical — `mdbook` schema
-/// changes (admonitions in 0.5+) and `mdbook-katex` 0.9 panicking against
-/// mdbook 0.5.2 are not hypothetical. Tilde-pin for the rest so we accept
-/// patch updates but block minor bumps that could break the template.
 const CRATES: &[(&str, &str)] = &[
     ("mdbook", "~0.5.2"),
-    // mdbook-katex 0.9.x panics against mdbook 0.5.2. Pin EXACTLY (`=`) — a
-    // bare "0.10.0-alpha" is a SemVer requirement that matches any prerelease
-    // with the same base (0.10.0-alpha.1, 0.10.0-alpha.2, …).
     ("mdbook-katex", "=0.10.0-alpha"),
     ("mdbook-mermaid", "~0.17.0"),
     ("mdbook-plantuml", "~2.0.0"),
     ("mdbook-pagetoc", "~0.3.0"),
     ("mdbook-pandoc", "~0.11.0"),
+];
+
+const SYSTEM_BINS: &[(&str, &str)] = &[
+    ("plantuml", "pacman -S plantuml / brew install plantuml"),
+    ("mmdc", "npm i -g @mermaid-js/mermaid-cli"),
+    ("pandoc", "pacman -S pandoc / brew install pandoc"),
+    ("lualatex", "pacman -S texlive-luatex / brew install --cask mactex"),
 ];
 
 pub fn run(force: bool) -> Result<()> {
@@ -38,6 +38,22 @@ pub fn run(force: bool) -> Result<()> {
             anyhow::bail!("cargo install {crate_name} failed with {status}");
         }
     }
-    tracing::info!("all required preprocessors are installed");
+    tracing::info!("all required Rust preprocessors are installed");
+
+    let mut missing_sys: Vec<(&str, &str)> = Vec::new();
+    for &(bin, hint) in SYSTEM_BINS {
+        if which::which(bin).is_ok() {
+            tracing::info!("system dep {bin} ✓");
+        } else {
+            missing_sys.push((bin, hint));
+        }
+    }
+    if !missing_sys.is_empty() {
+        tracing::warn!("optional system dependencies missing (needed for diagram/PDF features):");
+        for (bin, hint) in &missing_sys {
+            tracing::warn!("  {bin}: {hint}");
+        }
+    }
+
     Ok(())
 }

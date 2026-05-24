@@ -143,8 +143,18 @@ pub fn resync_workspace_src(book_src: &Path, src_canonical: &Path) -> Result<()>
     Workspace::do_mirror_and_summary(book_src, src_canonical)
 }
 
-/// Recursively mirror `.md` files from `src` into `dst`, preserving relative
-/// paths. Applies the common exclusion list at the directory level.
+/// Extensions we mirror into the workspace alongside `.md`. Covers standard
+/// image/media formats that markdown `![](path)` references need at hand.
+fn is_mirrorable_file(path: &Path) -> bool {
+    matches!(
+        path.extension().and_then(|e| e.to_str()),
+        Some("md" | "svg" | "png" | "jpg" | "jpeg" | "gif" | "webp" | "ico" | "bmp")
+    )
+}
+
+/// Recursively mirror mirrorable files (`.md` + common image formats) from
+/// `src` into `dst`, preserving relative paths. Applies the common exclusion
+/// list at the directory level.
 ///
 /// Defenses against pathological trees:
 /// 1. Name-based exclusion (`is_excluded_dir`) skips common noise dirs.
@@ -217,7 +227,7 @@ fn mirror_md_files(
             }
 
             mirror_md_files(&path, canonical_root, dst_root, mirrored, visited)?;
-        } else if path.extension().and_then(|e| e.to_str()) == Some("md") {
+        } else if is_mirrorable_file(&path) {
             let rel = path.strip_prefix(canonical_root).unwrap_or(&path);
             let dst_path = dst_root.join(rel);
             if let Some(parent) = dst_path.parent() {
@@ -680,6 +690,8 @@ fn install_theme(root: &Path) -> Result<()> {
         ("themes/julian.jee/css/general.css", "julian-jee-general.css"),
         ("themes/julian.jee/css/breadcrumb.css", "mdp-breadcrumb.css"),
         ("themes/julian.jee/js/breadcrumb.js", "mdp-breadcrumb.js"),
+        ("themes/pagetoc.css", "pagetoc.css"),
+        ("themes/pagetoc.js", "pagetoc.js"),
     ] {
         let data = Assets::get(src_path)
             .ok_or_else(|| anyhow::anyhow!("embedded asset missing: {src_path}"))?

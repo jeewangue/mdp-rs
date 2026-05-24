@@ -26,6 +26,8 @@ pub fn run(dir: PathBuf, out: PathBuf, title: Option<String>) -> Result<()> {
         anyhow::bail!("mdbook-mermaid install failed: {status}");
     }
 
+    super::register_mdp_preprocess(&workspace.root)?;
+
     let status = Command::new("mdbook")
         .arg("build")
         .arg(&workspace.root)

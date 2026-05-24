@@ -14,6 +14,30 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime};
 
+/// Replace stock `[preprocessor.plantuml]` with our `mdp preprocess` so
+/// diagrams get the tokyonight skinparam header. Called by both `serve` and
+/// `build` to keep their HTML output consistent.
+pub fn register_mdp_preprocess(book_root: &std::path::Path) -> Result<()> {
+    let book_toml = book_root.join("book.toml");
+    let existing = std::fs::read_to_string(&book_toml).context("read book.toml")?;
+    let filtered = serve::strip_preprocessor_blocks(&existing, &["plantuml"]);
+    std::fs::write(&book_toml, filtered).context("rewrite book.toml")?;
+
+    let self_exe = std::env::current_exe()
+        .context("failed to resolve current mdp executable path")?;
+    let mut f = std::fs::OpenOptions::new()
+        .append(true)
+        .open(&book_toml)
+        .context("open book.toml for append")?;
+    use std::io::Write as _;
+    writeln!(
+        f,
+        "\n[preprocessor.mdp-diagrams]\ncommand = \"{} preprocess\"",
+        crate::preset::toml_string_body_public(&self_exe.display().to_string())
+    )?;
+    Ok(())
+}
+
 /// Verify each named tool resolves on `PATH`. Bail with a friendly install
 /// hint when any are missing — used by `serve`/`build` (mdbook stack) and
 /// `pdf` (latex stack) to fail fast before mdbook's spawn errors leak out

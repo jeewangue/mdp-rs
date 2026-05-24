@@ -72,6 +72,7 @@ notifications, and automatic browser open.
 | `MDP_PDF_TIMEOUT`        | `600`   | Overall PDF build timeout (seconds; `0` to disable).                      |
 | `MDP_PDF_STALL_TIMEOUT`  | `60`    | Kill PDF build after N seconds of no output (lualatex hang detection).    |
 | `MDP_KEEP_WORKSPACE`     | _unset_ | Preserve the temp workspace on PDF failure for inspection.                |
+| `MDP_LOG`                | `info`  | `tracing` EnvFilter directive (e.g. `debug`, `mdp=trace`).               |
 
 ## Development
 

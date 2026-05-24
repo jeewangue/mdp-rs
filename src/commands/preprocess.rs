@@ -23,8 +23,25 @@ use serde_json::{Value, json};
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::time::Duration;
 
 use crate::theme::Assets;
+
+const DIAGRAM_RENDER_TIMEOUT: Duration = Duration::from_secs(30);
+
+fn wait_with_timeout(
+    child: std::process::Child,
+    timeout: Duration,
+    label: &str,
+) -> Result<std::process::Output> {
+    let (tx, rx) = std::sync::mpsc::sync_channel(1);
+    std::thread::spawn(move || {
+        let _ = tx.send(child.wait_with_output());
+    });
+    rx.recv_timeout(timeout)
+        .map_err(|_| anyhow::anyhow!("{label}: timed out after {}s", timeout.as_secs()))?
+        .context(format!("{label} I/O error"))
+}
 
 /// Which fence kinds should we transform for a given renderer?
 #[derive(Copy, Clone, Debug)]
@@ -304,7 +321,7 @@ fn render_plantuml(body: &str, out: &Path) -> Result<()> {
         .unwrap()
         .write_all(composed.as_bytes())
         .context("write plantuml stdin")?;
-    let output = child.wait_with_output()?;
+    let output = wait_with_timeout(child, DIAGRAM_RENDER_TIMEOUT, "plantuml")?;
     if !output.status.success() {
         anyhow::bail!(
             "plantuml failed ({}): {}",
@@ -336,9 +353,7 @@ fn render_mermaid(body: &str, out: &Path) -> Result<()> {
             "--output", out.to_str().context("non-utf8 output path")?,
             "--backgroundColor", "white",
             "--configFile", config_path.to_str().context("non-utf8 config path")?,
-            // `default` theme: dark text on white bg → readable on white PDF.
             "--theme", "default",
-            // 2x scale keeps the rasterised PNG crisp when pdflatex embeds it.
             "--scale", "2",
             "--quiet",
         ])
@@ -353,7 +368,7 @@ fn render_mermaid(body: &str, out: &Path) -> Result<()> {
         .unwrap()
         .write_all(body.as_bytes())
         .context("write mmdc stdin")?;
-    let output = child.wait_with_output()?;
+    let output = wait_with_timeout(child, DIAGRAM_RENDER_TIMEOUT, "mmdc")?;
     if !output.status.success() {
         anyhow::bail!(
             "mmdc failed ({}): {}",
