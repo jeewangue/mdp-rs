@@ -145,6 +145,20 @@ fn transform_markdown(src: &str, cache_dir: &Path, policy: TransformPolicy) -> R
     let mut out = String::with_capacity(src.len());
     let mut lines = src.lines().peekable();
 
+    // Strip YAML frontmatter (Pandoc spec: opened by `---`, closed by `---`
+    // or `...`). mdbook doesn't recognise it and renders the key-value pairs
+    // as literal text. YAML 1.2 §9.1.2 defines `...` as the document-end
+    // marker, so both closers are first-class.
+    if lines.peek().is_some_and(|l| l.trim() == "---") {
+        lines.next(); // opening ---
+        for line in lines.by_ref() {
+            let t = line.trim();
+            if t == "---" || t == "..." {
+                break;
+            }
+        }
+    }
+
     while let Some(line) = lines.next() {
         let trimmed = line.trim_start();
         let kind_unfiltered = fence_kind(trimmed);
