@@ -195,20 +195,45 @@ fn transform_markdown(src: &str, cache_dir: &Path, policy: TransformPolicy) -> R
                     continue;
                 }
 
-                match render_diagram(k, &body, cache_dir) {
-                    Ok((mime, bytes)) => {
-                        // Embed as a data URI. Works in both HTML (browser-
-                        // rendered <img>) and PDF (pandoc base64-decodes back
-                        // to a temp file). Avoids "where do I put the SVG so
-                        // both renderers can find it" pathing headaches.
-                        let alt = match k {
-                            DiagramKind::PlantUml => "plantuml diagram",
-                            DiagramKind::Mermaid => "mermaid diagram",
-                        };
-                        let b64 = base64::engine::general_purpose::STANDARD.encode(&bytes);
-                        out.push_str(&format!("![{alt}](data:{mime};base64,{b64})\n"));
+                // A plantuml fence may hold several @start…@end diagrams;
+                // render each on its own so their SVGs don't concatenate into
+                // one invalid stream. Mermaid fences are always a single
+                // diagram.
+                let parts = match k {
+                    DiagramKind::PlantUml => split_plantuml_diagrams(&body),
+                    DiagramKind::Mermaid => vec![body.clone()],
+                };
+                let alt = match k {
+                    DiagramKind::PlantUml => "plantuml diagram",
+                    DiagramKind::Mermaid => "mermaid diagram",
+                };
+
+                let mut rendered = String::new();
+                let mut render_err = None;
+                for part in &parts {
+                    match render_diagram(k, part, cache_dir) {
+                        Ok((mime, bytes)) => {
+                            // Embed as a data URI. Works in both HTML (browser-
+                            // rendered <img>) and PDF (pandoc base64-decodes
+                            // back to a temp file). Avoids "where do I put the
+                            // SVG so both renderers can find it" pathing
+                            // headaches.
+                            let b64 = base64::engine::general_purpose::STANDARD.encode(&bytes);
+                            rendered.push_str(&format!("![{alt}](data:{mime};base64,{b64})\n"));
+                        }
+                        Err(e) => {
+                            render_err = Some(e);
+                            break;
+                        }
                     }
-                    Err(e) => {
+                }
+
+                match render_err {
+                    None => out.push_str(&rendered),
+                    Some(e) => {
+                        // Any sub-diagram failing falls back to the original
+                        // fence verbatim + an error note — a partial render
+                        // would silently drop diagrams.
                         eprintln!("[mdp preprocess] diagram render failed: {e}");
                         out.push_str(line);
                         out.push('\n');
@@ -228,6 +253,44 @@ fn transform_markdown(src: &str, cache_dir: &Path, policy: TransformPolicy) -> R
     }
 
     Ok(out)
+}
+
+/// Split a PlantUML fence body into individual diagram sources.
+///
+/// A single fence may legally contain several `@start…/@end…` blocks. Piping
+/// them all through one `plantuml -pipe` invocation concatenates their SVGs
+/// into one stream with two `<svg>` roots — embedded as a single data URI that
+/// renders only the first diagram (or breaks). We render each block on its own
+/// instead, so multi-diagram fences embed as one `<img>` per diagram in order.
+///
+/// A body with no `@start…` delimiter is a single bare diagram and is returned
+/// unchanged (the wrap path in `compose_plantuml` handles it). An unterminated
+/// trailing `@start…` block is kept as its own part so plantuml reports the
+/// error against just that block.
+fn split_plantuml_diagrams(body: &str) -> Vec<String> {
+    let mut diagrams: Vec<String> = Vec::new();
+    let mut current: Option<String> = None;
+    for line in body.lines() {
+        let t = line.trim_start();
+        if current.is_none() && t.starts_with("@start") {
+            current = Some(String::new());
+        }
+        if let Some(buf) = current.as_mut() {
+            buf.push_str(line);
+            buf.push('\n');
+            if t.starts_with("@end") {
+                diagrams.push(current.take().expect("current is Some in this branch"));
+            }
+        }
+    }
+    if let Some(buf) = current.take() {
+        diagrams.push(buf);
+    }
+    if diagrams.is_empty() {
+        // No delimiter at all — a bare body is a single diagram.
+        diagrams.push(body.to_string());
+    }
+    diagrams
 }
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
@@ -294,18 +357,22 @@ fn render_diagram(
     Ok((mime, bytes))
 }
 
-fn render_plantuml(body: &str, out: &Path) -> Result<()> {
-    // Prepend the tokyonight skinparam header so the diagram blends with the
-    // julian.jee web theme.
-    let header_bytes = Assets::get("themes/plantuml-tokyonight.puml")
-        .context("embedded plantuml-tokyonight.puml missing")?
-        .data;
-    let header = std::str::from_utf8(header_bytes.as_ref())?;
-
-    // PlantUML expects @startuml ... @enduml. If the user's body doesn't include
-    // those, wrap it. We inject skinparams BETWEEN @startuml and the user's
-    // content — they have to come inside the block.
-    let composed = if body.contains("@startuml") {
+/// Compose a PlantUML fence `body` into a complete document for `plantuml -pipe`.
+///
+/// PlantUML is a family of sub-languages, each with its own `@start…/@end…`
+/// delimiters. We dispatch on the delimiter:
+///
+/// * `@startuml` — inject the tokyonight skinparam `header` right after the
+///   first `@startuml` line (skinparams must live *inside* the block).
+/// * any other `@start…` (`@startnwdiag`, `@startgantt`, `@startmindmap`,
+///   `@startsalt`, `@startjson`, `@startyaml`, `@startditaa`, …) — pass the
+///   body through verbatim. The header is `@startuml`-only skinparam syntax that
+///   these sub-languages reject, and they already carry their own delimiters, so
+///   wrapping would double-nest and fail with "Assumed diagram type: sequence".
+/// * no delimiter — assume a bare UML body and wrap it in `@startuml … @enduml`
+///   with the header.
+fn compose_plantuml(body: &str, header: &str) -> String {
+    if body.contains("@startuml") {
         // Inject header right after the first @startuml line.
         let mut out_str = String::new();
         let mut injected = false;
@@ -318,9 +385,33 @@ fn render_plantuml(body: &str, out: &Path) -> Result<()> {
             }
         }
         out_str
+    } else if has_diagram_delimiter(body) {
+        // Non-UML diagram type: render verbatim, ensuring a trailing newline so
+        // `@end…` is the last token plantuml sees on the pipe.
+        if body.ends_with('\n') {
+            body.to_string()
+        } else {
+            format!("{body}\n")
+        }
     } else {
         format!("@startuml\n{header}\n{body}\n@enduml\n")
-    };
+    }
+}
+
+/// True if any line opens a PlantUML sub-language block (`@start…`).
+fn has_diagram_delimiter(body: &str) -> bool {
+    body.lines().any(|l| l.trim_start().starts_with("@start"))
+}
+
+fn render_plantuml(body: &str, out: &Path) -> Result<()> {
+    // Prepend the tokyonight skinparam header so the diagram blends with the
+    // julian.jee web theme.
+    let header_bytes = Assets::get("themes/plantuml-tokyonight.puml")
+        .context("embedded plantuml-tokyonight.puml missing")?
+        .data;
+    let header = std::str::from_utf8(header_bytes.as_ref())?;
+
+    let composed = compose_plantuml(body, header);
 
     let mut child = Command::new("plantuml")
         .args(["-pipe", "-tsvg", "-charset", "UTF-8"])
@@ -394,7 +485,86 @@ fn render_mermaid(body: &str, out: &Path) -> Result<()> {
 }
 #[cfg(test)]
 mod fence_tests {
-    use super::{DiagramKind, fence_kind};
+    use super::{
+        DiagramKind, compose_plantuml, fence_kind, has_diagram_delimiter, split_plantuml_diagrams,
+    };
+
+    #[test]
+    fn split_single_diagram_is_unchanged() {
+        let parts = split_plantuml_diagrams("@startuml\nA -> B\n@enduml");
+        assert_eq!(parts.len(), 1);
+        assert!(parts[0].contains("A -> B"));
+    }
+
+    #[test]
+    fn split_multiple_diagrams() {
+        let body = "@startuml first\nA -> B\n@enduml\n@startuml second\nC -> D\n@enduml";
+        let parts = split_plantuml_diagrams(body);
+        assert_eq!(parts.len(), 2, "two @start blocks -> two diagrams: {parts:?}");
+        assert!(parts[0].contains("A -> B") && !parts[0].contains("C -> D"));
+        assert!(parts[1].contains("C -> D") && !parts[1].contains("A -> B"));
+    }
+
+    #[test]
+    fn split_mixed_diagram_types() {
+        let body = "@startuml\nA -> B\n@enduml\n@startnwdiag\nnwdiag { network n { web; } }\n@endnwdiag";
+        let parts = split_plantuml_diagrams(body);
+        assert_eq!(parts.len(), 2);
+        assert!(parts[1].contains("@startnwdiag") && parts[1].contains("@endnwdiag"));
+    }
+
+    #[test]
+    fn split_bare_body_is_single() {
+        let parts = split_plantuml_diagrams("A -> B\nB -> C");
+        assert_eq!(parts.len(), 1);
+        assert_eq!(parts[0], "A -> B\nB -> C");
+    }
+
+    const HDR: &str = "skinparam X Y\n";
+
+    #[test]
+    fn compose_injects_header_after_startuml() {
+        let out = compose_plantuml("@startuml\nA -> B\n@enduml", HDR);
+        // Header lands right after the @startuml line, before user content.
+        let start = out.find("@startuml").unwrap();
+        let hdr = out.find("skinparam X Y").unwrap();
+        let body = out.find("A -> B").unwrap();
+        assert!(start < hdr && hdr < body, "header must sit inside the block: {out:?}");
+    }
+
+    #[test]
+    fn compose_passes_nwdiag_through_verbatim() {
+        // Network diagrams use @startnwdiag and reject @startuml skinparams.
+        let body = "@startnwdiag\nnwdiag {\n  network dmz { web; }\n}\n@endnwdiag";
+        let out = compose_plantuml(body, HDR);
+        assert!(!out.contains("@startuml"), "must not wrap non-uml diagram: {out:?}");
+        assert!(!out.contains("skinparam X Y"), "must not inject uml header: {out:?}");
+        assert_eq!(out, format!("{body}\n"), "verbatim + trailing newline");
+    }
+
+    #[test]
+    fn compose_passes_other_diagram_types_through() {
+        for d in ["@startgantt", "@startmindmap", "@startsalt", "@startjson", "@startyaml"] {
+            let body = format!("{d}\nstuff\n@end");
+            let out = compose_plantuml(&body, HDR);
+            assert!(!out.contains("@startuml"), "{d} must not be wrapped: {out:?}");
+        }
+    }
+
+    #[test]
+    fn compose_wraps_bare_body() {
+        let out = compose_plantuml("A -> B", HDR);
+        assert!(out.starts_with("@startuml\n"));
+        assert!(out.contains("skinparam X Y"));
+        assert!(out.trim_end().ends_with("@enduml"));
+    }
+
+    #[test]
+    fn delimiter_detection() {
+        assert!(has_diagram_delimiter("@startnwdiag\n..."));
+        assert!(has_diagram_delimiter("  @startgantt"));
+        assert!(!has_diagram_delimiter("just text\nno delim"));
+    }
 
     #[test]
     fn recognizes_basic_plantuml() {

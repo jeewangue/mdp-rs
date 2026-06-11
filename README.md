@@ -66,6 +66,7 @@ notifications, and automatic browser open.
 | `MDP_PORT`               | `3456`  | Override `--port`.                                                        |
 | `MDP_HOST`               | `127.0.0.1` | Override `--host`. Non-loopback requires `MDP_ALLOW_NON_LOOPBACK`.    |
 | `MDP_ALLOW_NON_LOOPBACK` | _unset_ | Set to `1` to let `MDP_HOST` bind to a non-loopback address.              |
+| `MDP_FOLLOW_SYMLINKS`    | _unset_ | Set to `1` to deref-copy `.md` symlinks pointing outside the source tree instead of skipping them (for trusted aggregators that symlink sibling repos). |
 | `MDP_BOOK_LANG`          | `$LANG` → `en` | `<html lang>` value; first BCP-47 segment of `$LANG`/`$LC_ALL`.    |
 | `MDP_AUTHOR`             | `$USER` | Author string in generated `book.toml`.                                   |
 | `MDP_PLANTUML_SERVER`    | plantuml.com | `http://` or `https://` PlantUML server. Path-style refused.         |

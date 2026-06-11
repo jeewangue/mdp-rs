@@ -9,6 +9,48 @@ use tempfile::TempDir;
 use crate::config::BookConfig;
 use crate::theme::Assets;
 
+/// When `MDP_FOLLOW_SYMLINKS=1`, symlinks whose target escapes the source tree
+/// are deref-copied into the workspace instead of being skipped. Default off:
+/// the served preview must not expose arbitrary filesystem `.md` reachable via a
+/// symlink the source author didn't intend to publish. Opt in only for trees you
+/// trust (e.g. a docs aggregator that symlinks sibling repos by design).
+fn follow_escaping_symlinks() -> bool {
+    std::env::var("MDP_FOLLOW_SYMLINKS")
+        .map(|v| v == "1")
+        .unwrap_or(false)
+}
+
+/// Outcome of the escaping-symlink guard for one directory entry. Shared by the
+/// mirror, SUMMARY, and watch-set walks so all three agree on what is visible —
+/// an inconsistency here makes mdbook reference chapters that were never copied.
+enum Guard {
+    /// Process this entry. `escaping` is true for a *followed* escaping symlink
+    /// (`MDP_FOLLOW_SYMLINKS=1`); the mirror deref-copies these so the workspace
+    /// stays self-contained.
+    Proceed { escaping: bool },
+    /// Symlink target is unresolvable (broken / ELOOP) — skip silently.
+    SkipBroken,
+    /// Symlink escapes the tree and following is disabled — skip.
+    SkipEscaping,
+}
+
+fn classify_symlink(md: &std::fs::Metadata, path: &Path, canonical_root: &Path) -> Guard {
+    if !md.file_type().is_symlink() {
+        return Guard::Proceed { escaping: false };
+    }
+    let Ok(resolved) = path.canonicalize() else {
+        return Guard::SkipBroken;
+    };
+    if resolved.starts_with(canonical_root) {
+        return Guard::Proceed { escaping: false };
+    }
+    if follow_escaping_symlinks() {
+        Guard::Proceed { escaping: true }
+    } else {
+        Guard::SkipEscaping
+    }
+}
+
 pub struct Workspace {
     /// Root of the prepared mdbook project (tmpdir root).
     pub root: PathBuf,
@@ -94,14 +136,10 @@ fn walk_md_set(
             Ok(m) => m,
             Err(_) => continue,
         };
-        if md.file_type().is_symlink() {
-            let resolved = match path.canonicalize() {
-                Ok(p) => p,
-                Err(_) => continue,
-            };
-            if !resolved.starts_with(canonical_root) {
-                continue;
-            }
+        if let Guard::SkipBroken | Guard::SkipEscaping =
+            classify_symlink(&md, &path, canonical_root)
+        {
+            continue;
         }
         if path.is_dir() {
             if let Some(name) = path.file_name().and_then(|n| n.to_str())
@@ -186,20 +224,20 @@ fn mirror_md_files(
             Err(_) => continue,
         };
 
-        // Block symlinks that escape the tree — their target could be anywhere.
-        if md.file_type().is_symlink() {
-            let resolved = match path.canonicalize() {
-                Ok(p) => p,
-                Err(_) => continue, // broken link or OS ELOOP — skip silently
-            };
-            if !resolved.starts_with(canonical_root) {
+        // Guard symlinks that escape the tree — their target could be anywhere.
+        // With MDP_FOLLOW_SYMLINKS=1 they are deref-copied instead of skipped.
+        let escaping = match classify_symlink(&md, &path, canonical_root) {
+            Guard::Proceed { escaping } => escaping,
+            Guard::SkipBroken => continue, // broken link or OS ELOOP — skip silently
+            Guard::SkipEscaping => {
                 tracing::warn!(
-                    "skipping symlink that escapes source tree: {}",
+                    "skipping symlink that escapes source tree: {} \
+                     (set MDP_FOLLOW_SYMLINKS=1 to include)",
                     path.display()
                 );
                 continue;
             }
-        }
+        };
 
         // `is_dir()` on a symlink follows; we already bounded it above.
         if path.is_dir() {
@@ -236,10 +274,16 @@ fn mirror_md_files(
             if dst_path.exists() {
                 continue;
             }
-            #[cfg(unix)]
-            std::os::unix::fs::symlink(&path, &dst_path)?;
-            #[cfg(not(unix))]
-            std::fs::copy(&path, &dst_path)?;
+            if escaping {
+                // Followed escaping symlink: deref-copy so the workspace never
+                // points outside itself (a symlink would dangle past tmpdir life).
+                std::fs::copy(&path, &dst_path)?;
+            } else {
+                #[cfg(unix)]
+                std::os::unix::fs::symlink(&path, &dst_path)?;
+                #[cfg(not(unix))]
+                std::fs::copy(&path, &dst_path)?;
+            }
             *mirrored += 1;
         }
     }
@@ -447,14 +491,13 @@ fn build_chapter_tree(root: &Path, canonical_root: &Path) -> Result<ChapterTree>
                 Ok(m) => m,
                 Err(_) => continue,
             };
-            if md.file_type().is_symlink() {
-                let resolved = match path.canonicalize() {
-                    Ok(p) => p,
-                    Err(_) => continue,
-                };
-                if !resolved.starts_with(canonical_root) {
+            match classify_symlink(&md, &path, canonical_root) {
+                Guard::Proceed { .. } => {}
+                Guard::SkipBroken => continue,
+                Guard::SkipEscaping => {
                     tracing::warn!(
-                        "skipping symlink that escapes source tree: {}",
+                        "skipping symlink that escapes source tree: {} \
+                         (set MDP_FOLLOW_SYMLINKS=1 to include)",
                         path.display()
                     );
                     continue;

@@ -96,6 +96,7 @@ asset path through `assets/` and verify smoke still passes.
 | `MDP_PORT` | `3456` | `serve --port` override. |
 | `MDP_HOST` | `127.0.0.1` | Bind address. Non-loopback requires `MDP_ALLOW_NON_LOOPBACK`. |
 | `MDP_ALLOW_NON_LOOPBACK` | unset | When `1`, lets `MDP_HOST` bind to a non-`127.x.x.x` address. |
+| `MDP_FOLLOW_SYMLINKS` | unset | When `1`, escaping `.md` symlinks are deref-copied into the workspace instead of skipped. Default-off guards the served preview from exposing arbitrary filesystem `.md`. Opt in for trusted aggregators (e.g. a docs book that symlinks sibling repos). |
 | `MDP_BOOK_LANG` | `$LANG` first BCP-47 segment, fallback `en` | `<html lang>` value. |
 | `MDP_AUTHOR` | `$USER` → `$USERNAME` → `mdp` | Author string in generated `book.toml`. |
 | `MDP_PLANTUML_SERVER` | `https://www.plantuml.com/plantuml` | `http://` or `https://` URL. Path-style refused. |
